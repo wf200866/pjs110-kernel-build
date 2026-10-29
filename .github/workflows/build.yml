@@ -108,14 +108,31 @@ jobs:
           CONFIG_NETFILTER_XT_TARGET_NFLOG=y
           EOF
 
-          # 2) 删掉 OPPO 开源漏掉的闭源模块 Kconfig 引用（这 7 个文件不在官方 git 里）
-          sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
-          sed -i '/healthinfo\/Kconfig/d' fs/proc/Kconfig
-          sed -i '/task_cpustats\/Kconfig/d' fs/proc/Kconfig
-          sed -i '/kernel\/sched_assist\/Kconfig/d' init/Kconfig
-          sed -i '/kernel\/locking\/klockopt\/Kconfig/d' init/Kconfig
-          sed -i '/rootguard\/Kconfig/d' arch/arm64/Kconfig
-          sed -i '/uxio_first\/Kconfig/d' block/Kconfig
+          # 2) 自动删掉 OPPO 开源漏掉的闭源模块 Kconfig 引用（基于 git 追踪状态精确判断）
+          python3 - << 'PYEOF'
+          import subprocess, re
+          tracked = set(subprocess.check_output(["git", "ls-files"]).decode().splitlines())
+          out = subprocess.check_output(["git", "grep", "-nE", r'source\s+"?[^"\s]+Kconfig"?', "--", "*.Kconfig", "**/Kconfig"]).decode(errors="replace")
+          deleted = {}
+          for line in out.splitlines():
+              m = re.match(r'^(.*?):(\d+):(.*)$', line)
+              if not m: continue
+              kf, content = m.group(1), m.group(3)
+              # 跳过非 arm64 架构目录
+              if re.search(r'^arch/(arm|alpha|arc|mips|powerpc|x86|um|riscv|sparc|sh|parisc|s390|m68k|xtensa|nios2|openrisc|csky|h8300|hexagon|ia64|microblaze|nds32|unicore32|c6x)/', kf):
+                  continue
+              m2 = re.search(r'source\s+"?([^"\s]+Kconfig)"?', content)
+              if not m2: continue
+              p = m2.group(1).rstrip('/')
+              if '$(' in p or p == 'kernel/Kconfig': continue  # 变量展开/误报
+              if p not in tracked:
+                  deleted.setdefault(kf, []).append(p)
+          for kf, ps in deleted.items():
+              for p in ps:
+                  subprocess.run(["sed", "-i", f"\\|{p}|d", kf])
+              print(f"deleted from {kf}: {ps}")
+          print("total missing refs removed:", sum(len(v) for v in deleted.values()))
+          PYEOF
 
           # 3) 关闭模块签名强制校验（OPPO 私钥不可得，否则 vendor .ko 拒载）
           sed -i '/CONFIG_MODULE_SIG=y/c\CONFIG_MODULE_SIG=n' arch/arm64/configs/k6833v1_64_k419_defconfig

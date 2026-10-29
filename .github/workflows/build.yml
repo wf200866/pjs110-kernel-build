@@ -13,10 +13,10 @@ jobs:
           repository: oppo-source/android_kernel_oppo_mt6833
           ref: oppo/mt6833_t_13.1.1_a2x_5g
 
-      - name: Fetch Android toolchain (clang r383902 + gcc 4.9)
+      - name: Install cross toolchain (apt)
         run: |
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/clang-r383902 clang
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc
+          sudo apt-get update
+          sudo apt-get install -y clang lld gcc-aarch64-linux-gnu make libncurses-dev flex bison libssl-dev bc
 
       - name: Apply Droidspaces config + fix OPPO/MTK module loading
         run: |
@@ -121,18 +121,13 @@ jobs:
 
       - name: Build kernel
         run: |
-          export PATH=$PWD/clang/bin:$PWD/gcc/bin:$PATH
           make O=out ARCH=arm64 \
-            CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
             k6833v1_64_k419_defconfig
           # 确认关键配置已生效
           grep -E "CONFIG_MODVERSIONS|CONFIG_MODULE_SIG|CONFIG_SYSVIPC|CONFIG_OVERLAY_FS|CONFIG_USER_NS" out/.config
           make O=out ARCH=arm64 \
-            CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
             -j$(nproc)
 
       - name: Upload kernel image

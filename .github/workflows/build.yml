@@ -122,7 +122,7 @@ jobs:
       - name: Auto-fix missing Kconfig refs (loop until config passes)
         run: |
           set +e
-          for i in $(seq 1 200); do
+          for i in $(seq 1 300); do
             make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- k6833v1_64_k419_defconfig > /tmp/cfg_loop.log 2>&1
             code=$?
             if [ $code -eq 0 ]; then
@@ -141,6 +141,17 @@ jobs:
             done
             rm -f out/.config
           done
+
+      - name: Remove dangling OPPO symlinks (point to vendor, not present)
+        run: |
+          git ls-files -s | grep "^120000" | awk '{print $4}' | while read -r link; do
+            target=$(readlink "$link" 2>/dev/null)
+            if [ -n "$target" ] && (echo "$target" | grep -q "vendor" || [ ! -e "$link" ]); then
+              echo "removing symlink: $link -> $target"
+              rm -f "$link"
+            fi
+          done
+          echo "symlinks cleaned"
 
           # 3) 关闭模块签名强制校验（OPPO 私钥不可得，否则 vendor .ko 拒载）
           sed -i '/CONFIG_MODULE_SIG=y/c\CONFIG_MODULE_SIG=n' arch/arm64/configs/k6833v1_64_k419_defconfig

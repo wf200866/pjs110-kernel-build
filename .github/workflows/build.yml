@@ -151,7 +151,14 @@ jobs:
               rm -f "$link"
             fi
           done
-          echo "symlinks cleaned"
+          # 删掉无条件编译断链目录的 obj-y 引用（这些是 OPPO 闭源模块）
+          sed -i '/obj-y += healthinfo\//d' mm/Makefile
+          sed -i '/obj-y += sched_assist\//d' kernel/Makefile
+          # 关掉触发断链目录的 CONFIG
+          sed -i 's/CONFIG_OPLUS_SECURE_GUARD=y/# CONFIG_OPLUS_SECURE_GUARD is not set/' arch/arm64/configs/k6833v1_64_k419_defconfig
+          sed -i 's/CONFIG_OPLUS_FEATURE_UXIO_FIRST=y/# CONFIG_OPLUS_FEATURE_UXIO_FIRST is not set/' arch/arm64/configs/k6833v1_64_k419_defconfig
+          sed -i 's/CONFIG_DUMP_TASKS_MEM=y/# CONFIG_DUMP_TASKS_MEM is not set/' arch/arm64/configs/k6833v1_64_k419_defconfig
+          echo "Makefile refs cleaned"
 
           # 3) 关闭模块签名强制校验（OPPO 私钥不可得，否则 vendor .ko 拒载）
           sed -i '/CONFIG_MODULE_SIG=y/c\CONFIG_MODULE_SIG=n' arch/arm64/configs/k6833v1_64_k419_defconfig

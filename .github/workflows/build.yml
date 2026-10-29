@@ -108,8 +108,10 @@ jobs:
           CONFIG_NETFILTER_XT_TARGET_NFLOG=y
           EOF
 
-          # 2) 删掉 OPPO 开源漏掉的 cpu_jankinfo Kconfig 引用
+          # 2) 删掉 OPPO 开源漏掉的闭源模块 Kconfig 引用
           sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
+          sed -i '/kernel\/sched_assist\/Kconfig/d' init/Kconfig
+          sed -i '/kernel\/locking\/klockopt\/Kconfig/d' init/Kconfig
 
           # 3) 关闭模块签名强制校验（OPPO 私钥不可得，否则 vendor .ko 拒载）
           sed -i '/CONFIG_MODULE_SIG=y/c\CONFIG_MODULE_SIG=n' arch/arm64/configs/k6833v1_64_k419_defconfig

@@ -108,7 +108,7 @@ jobs:
           CONFIG_NETFILTER_XT_TARGET_NFLOG=y
           EOF
 
-          # 2) 关闭 OPPO 闭源模块 feature + 删引用（这些跟 Droidspaces 无关，且源码未开源）
+          # 2) 关闭 OPPO 闭源模块 feature
           DEF=arch/arm64/configs/k6833v1_64_k419_defconfig
           sed -i 's/CONFIG_OPLUS_FEATURE_LOWMEM_DBG=y/# CONFIG_OPLUS_FEATURE_LOWMEM_DBG is not set/' $DEF
           sed -i 's/CONFIG_OPLUS_HEALTHINFO=y/# CONFIG_OPLUS_HEALTHINFO is not set/' $DEF
@@ -118,18 +118,29 @@ jobs:
           sed -i 's/CONFIG_OPLUS_FEATURE_TASK_CPUSTATS=y/# CONFIG_OPLUS_FEATURE_TASK_CPUSTATS is not set/' $DEF
           sed -i 's/CONFIG_KMALLOC_DEBUG=y/# CONFIG_KMALLOC_DEBUG is not set/' $DEF
           sed -i 's/CONFIG_VMALLOC_DEBUG=y/# CONFIG_VMALLOC_DEBUG is not set/' $DEF
-          sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
-          sed -i '/fs\/proc\/healthinfo\/Kconfig/d' fs/proc/Kconfig
-          sed -i '/fs\/proc\/task_cpustats\/Kconfig/d' fs/proc/Kconfig
-          sed -i '/kernel\/sched_assist\/Kconfig/d' init/Kconfig
-          sed -i '/kernel\/locking\/klockopt\/Kconfig/d' init/Kconfig
-          sed -i '/rootguard\/Kconfig/d' arch/arm64/Kconfig
-          sed -i '/uxio_first\/Kconfig/d' block/Kconfig
-          sed -i '/mm\/healthinfo\/Kconfig/d' mm/Kconfig
-          sed -i '/mm\/malloc_track\/Kconfig/d' mm/Kconfig
-          sed -i '/mm\/task_mem\/Kconfig/d' mm/Kconfig
-          sed -i '/lowmem_dbg\/Kconfig/d' drivers/soc/Kconfig
-          sed -i '/iomonitor\/Kconfig/d' drivers/soc/Kconfig
+
+      - name: Auto-fix missing Kconfig refs (loop until config passes)
+        run: |
+          set +e
+          for i in $(seq 1 200); do
+            make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- k6833v1_64_k419_defconfig > /tmp/cfg_loop.log 2>&1
+            code=$?
+            if [ $code -eq 0 ]; then
+              echo "CONFIG_OK round=$i"
+              break
+            fi
+            missing=$(grep -oE "can't open file \"[^\"]+\"" /tmp/cfg_loop.log | head -1 | sed "s/can't open file \"//; s/\"$//")
+            if [ -z "$missing" ]; then
+              echo "NO_MISSING_FILE_FOUND"
+              tail -40 /tmp/cfg_loop.log
+              exit 1
+            fi
+            echo "round=$i missing=$missing"
+            grep -rlF "$missing" --include=Kconfig . 2>/dev/null | while read -r f; do
+              sed -i "\\|$missing|d" "$f"
+            done
+            rm -f out/.config
+          done
 
           # 3) 关闭模块签名强制校验（OPPO 私钥不可得，否则 vendor .ko 拒载）
           sed -i '/CONFIG_MODULE_SIG=y/c\CONFIG_MODULE_SIG=n' arch/arm64/configs/k6833v1_64_k419_defconfig

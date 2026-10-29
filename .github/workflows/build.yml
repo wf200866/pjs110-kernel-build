@@ -108,7 +108,16 @@ jobs:
           CONFIG_NETFILTER_XT_TARGET_NFLOG=y
           EOF
 
-          # 2) 删掉 OPPO 开源漏掉的闭源模块 Kconfig 引用（9 个，git 里都没有）
+          # 2) 关闭 OPPO 闭源模块 feature + 删引用（这些跟 Droidspaces 无关，且源码未开源）
+          DEF=arch/arm64/configs/k6833v1_64_k419_defconfig
+          sed -i 's/CONFIG_OPLUS_FEATURE_LOWMEM_DBG=y/# CONFIG_OPLUS_FEATURE_LOWMEM_DBG is not set/' $DEF
+          sed -i 's/CONFIG_OPLUS_HEALTHINFO=y/# CONFIG_OPLUS_HEALTHINFO is not set/' $DEF
+          sed -i 's/CONFIG_OPLUS_FEATURE_SCHED_ASSIST=y/# CONFIG_OPLUS_FEATURE_SCHED_ASSIST is not set/' $DEF
+          sed -i 's/CONFIG_OPLUS_FEATURE_CPU_JANKINFO=y/# CONFIG_OPLUS_FEATURE_CPU_JANKINFO is not set/' $DEF
+          sed -i 's/CONFIG_OPLUS_FEATURE_MEMLEAK_DETECT=y/# CONFIG_OPLUS_FEATURE_MEMLEAK_DETECT is not set/' $DEF
+          sed -i 's/CONFIG_OPLUS_FEATURE_TASK_CPUSTATS=y/# CONFIG_OPLUS_FEATURE_TASK_CPUSTATS is not set/' $DEF
+          sed -i 's/CONFIG_KMALLOC_DEBUG=y/# CONFIG_KMALLOC_DEBUG is not set/' $DEF
+          sed -i 's/CONFIG_VMALLOC_DEBUG=y/# CONFIG_VMALLOC_DEBUG is not set/' $DEF
           sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
           sed -i '/fs\/proc\/healthinfo\/Kconfig/d' fs/proc/Kconfig
           sed -i '/fs\/proc\/task_cpustats\/Kconfig/d' fs/proc/Kconfig
@@ -118,6 +127,9 @@ jobs:
           sed -i '/uxio_first\/Kconfig/d' block/Kconfig
           sed -i '/mm\/healthinfo\/Kconfig/d' mm/Kconfig
           sed -i '/mm\/malloc_track\/Kconfig/d' mm/Kconfig
+          sed -i '/mm\/task_mem\/Kconfig/d' mm/Kconfig
+          sed -i '/lowmem_dbg\/Kconfig/d' drivers/soc/Kconfig
+          sed -i '/iomonitor\/Kconfig/d' drivers/soc/Kconfig
 
           # 3) 关闭模块签名强制校验（OPPO 私钥不可得，否则 vendor .ko 拒载）
           sed -i '/CONFIG_MODULE_SIG=y/c\CONFIG_MODULE_SIG=n' arch/arm64/configs/k6833v1_64_k419_defconfig

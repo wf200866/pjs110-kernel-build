@@ -104,16 +104,25 @@ jobs:
             '#include <linux/types.h>' 'struct pid;' \
             'static inline bool oppo_is_android_core_group(struct pid *pgrp) { return false; }' \
             '#endif' > include/soc/oplus/system/oppo_process.h
-          printf '%s\n' '#ifndef _OPPO_PROJECT_H_' '#define _OPPO_PROJECT_H_' \
-            '#include <linux/types.h>' \
-            'static inline int get_project(void) { return 20015; }' \
-            'static inline int get_PCB_Version(void) { return 0; }' \
-            '#endif' > include/soc/oplus/system/oppo_project.h
+          # 注意：oppo_project.h 不能造桩！vendor 里有真头文件 + 真 .c 实体
+          # 内核树 include/soc/oplus/system/ 目录存在，但唯独缺 oplus_project.h 的链接
+          if [ -f include/soc/oplus/system/oppo_project.h ]; then
+            rm -f include/soc/oplus/system/oppo_project.h
+            echo "  [ok]   移除旧桩 oppo_project.h"
+          fi
+          if [ ! -e include/soc/oplus/system/oplus_project.h ]; then
+            ln -sf "$V/oplus/kernel/boot/include/oplus_project.h" \
+                   include/soc/oplus/system/oplus_project.h
+            echo "  [ok]   symlink oplus_project.h -> vendor 真头文件"
+          fi
+          test -f include/soc/oplus/system/oplus_project.h \
+            && echo "  [ok]   头文件可读" || { echo "  [FAIL] oplus_project.h 不可读"; fail=1; }
+          grep -c 'get_eng_version' include/soc/oplus/system/oplus_project.h 2>/dev/null || true
           [ -f include/scp.h ] || printf '%s\n' '#ifndef _SCP_FORWARD_H_' \
             '#define _SCP_FORWARD_H_' \
             '#include <../drivers/misc/mediatek/scp/include/scp.h>' \
             '#endif' > include/scp.h
-          ok $? "三个桩"
+          ok $? "桩头文件处理"
 
           echo "===== F. -Werror -> -Wno-error ====="
           grep -rl -- "-Werror" --include=Makefile --include=Kbuild --include="*.mk" . 2>/dev/null | while read -r f; do
@@ -123,11 +132,14 @@ jobs:
 
           echo "===== G. config ====="
           cp /tmp/stock.config out.config
+          # Droidspaces 必需
           printf '\nCONFIG_SYSVIPC=y\nCONFIG_SYSVIPC_SYSCTL=y\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_POSIX_MQUEUE=y\n' >> out.config
+          # OPPO 项目信息模块：原厂 config 没开，导致 get_eng_version/get_PCB_Version 无定义
+          printf 'CONFIG_OPLUS_FEATURE_OPROJECT=y\n' >> out.config
           sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out.config
           sed -i 's/^CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/' out.config
           sed -i 's/^CONFIG_MODULE_SIG_ALL=y/# CONFIG_MODULE_SIG_ALL is not set/' out.config
-          grep -E "^CONFIG_(SYSVIPC|IPC_NS|USER_NS|CGROUP_PIDS|DEVTMPFS|POSIX_MQUEUE)=" out.config || true
+          grep -E "^CONFIG_(SYSVIPC|IPC_NS|USER_NS|CGROUP_PIDS|DEVTMPFS|POSIX_MQUEUE|OPLUS_FEATURE_OPROJECT)=" out.config || true
 
           [ "$fail" -eq 0 ] && echo "ALL PATCHES OK" || { echo "!! 有必改项失败"; exit 1; }
 

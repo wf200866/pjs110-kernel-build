@@ -107,10 +107,23 @@ jobs:
           # 删掉 OPPO 开源漏掉的 cpu_jankinfo Kconfig 引用（这个文件 vendor 里也没有）
           sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
 
-          # 关掉 IKHEADERS（避免 proot/cross 环境 cpio 问题）
-          cat >> $DEF << 'EOF'
-          # CONFIG_IKHEADERS is not set
-          EOF
+          # 关掉 OPLUS 稳定性/性能模块（OPPO 开源时漏了对应源码文件，会导致编译失败）
+          # 这些跟 Droidspaces 功能无关
+          for c in OPLUS_SYSTEM_KERNEL OPLUS_FEATURE_OPROJECT OPLUS_FEATURE_FEEDBACK \
+                   OPLUS_DEVICE_IFNO OPLUS_FEATURE_THEIA OPLUS_FEATURE_SHUTDOWN_DETECT \
+                   OPLUS_FEATURE_PHOENIX OPLUS_FEATURE_OLC OPLUS_FEATURE_FDLEAK_CHECK \
+                   OPLUS_FEATURE_LAST_BOOT_REASON OPLUS_FEATURE_MTK_FORCE_SHUTDOWN \
+                   OPLUS_FEATURE_KMSG_WB OPLUS_FEATURE_PANIC_FLUSH \
+                   OPLUS_FEATURE_UID_PERF CONT_PTE_HUGEPAGE HYBRIDSWAP \
+                   OPLUS_FEATURE_SCHED_ASSIST OPLUS_SECURE_GUARD OPLUS_HEALTHINFO \
+                   OPLUS_FEATURE_CPU_JANKINFO OPLUS_FEATURE_TASK_CPUSTATS \
+                   OPLUS_FEATURE_MEMLEAK_DETECT OPLUS_FEATURE_LOWMEM_DBG; do
+            sed -i "s/^CONFIG_${c}=y/# CONFIG_${c} is not set/" $DEF
+            sed -i "s/^CONFIG_${c}=m/# CONFIG_${c} is not set/" $DEF
+          done
+
+          # 关掉 IKHEADERS（避免 cross 环境 cpio 问题）
+          echo "# CONFIG_IKHEADERS is not set" >> $DEF
 
       - name: Build kernel
         run: |

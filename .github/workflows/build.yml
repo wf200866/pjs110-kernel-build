@@ -108,14 +108,14 @@ jobs:
           # drivers/soc/oplus/system -> vendor/oplus/kernel/system 链接已存在
           # 但空 Makefile 导致 system/ 从不被递归，oplus_project 永远编不进去
           SOCMK="drivers/soc/oplus/Makefile"
-          echo "  --- 修前 $SOCMK ($(wc -c < "$SOCMK" 2>/dev/null || echo ?) 字节) ---"
-          cat "$SOCMK" 2>/dev/null || true
-          if [ ! -s "$SOCMK" ] || ! grep -q '^obj-.*system/' "$SOCMK" 2>/dev/null; then
+          echo "  --- 修前 ---"; cat "$SOCMK" 2>/dev/null; echo "[EOF]"
+          if ! grep -q 'system/' "$SOCMK" 2>/dev/null; then
+            # 文件末尾可能没有换行，先补一个，否则会粘成一行
+            [ -s "$SOCMK" ] && [ "$(tail -c1 "$SOCMK" | wc -l)" -eq 0 ] && printf '\n' >> "$SOCMK"
             printf 'obj-y += system/\n' >> "$SOCMK"
             ok $? "drivers/soc/oplus/Makefile 追加 obj-y += system/"
           fi
-          echo "  --- 修后 ---"
-          cat "$SOCMK"
+          echo "  --- 修后 ---"; cat "$SOCMK"; echo "[EOF]"
           test -d drivers/soc/oplus/system/oplus_project \
             && echo "  [ok]   system/oplus_project 可访问" \
             || { echo "  [FAIL] system/oplus_project 不存在"; fail=1; }

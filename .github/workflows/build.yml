@@ -57,12 +57,13 @@ jobs:
             '#endif' > include/soc/oplus/system/oppo_process.h
           echo "=== oppo_process.h stub created ==="
           # touch.c 用到 TP_VXN 但 vendor 的 tp_devices.h 没定义（OPPO 源码版本不一致）
-          TPDEV="$PARENT/vendor/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"
+          TPDEV="$(dirname "$GITHUB_WORKSPACE")/vendor/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"
+          echo "TPDEV=$TPDEV"
           if [ -f "$TPDEV" ] && ! grep -q "TP_VXN" "$TPDEV"; then
             sed -i 's/^    TP_TXD,/    TP_TXD,\n    TP_VXN,/' "$TPDEV"
-            echo "=== added TP_VXN to tp_devices.h ==="
-            grep -n "TP_TXD\|TP_VXN" "$TPDEV"
+            echo "=== added TP_VXN ==="
           fi
+          grep -c "TP_VXN" "$TPDEV" 2>/dev/null || echo "TPDEV not found"
           sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' drivers/block/zram/zram_drv_internal.h 2>/dev/null || true
           sed -i 's/^extern inline bool is_thp_zram/extern bool is_thp_zram/' drivers/block/zram/zram_drv_internal.h 2>/dev/null || true
           grep -n "zram_page_state\|is_thp_zram" drivers/block/zram/zram_drv_internal.h 2>/dev/null | head -2
@@ -83,7 +84,7 @@ jobs:
           mkdir -p out
           cp out.config out/.config
           # 直接编译，不跑 olddefconfig（原厂 config 可能含 OPPO 特有 symbol，olddefconfig 会因缺失 Kconfig 报错）
-          make O=out ARCH=arm64 -j$(nproc) KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size"
+          make O=out ARCH=arm64 -j$(nproc) Image.gz KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size"
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4

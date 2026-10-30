@@ -109,13 +109,31 @@ jobs:
           # 但空 Makefile 导致 system/ 从不被递归，oplus_project 永远编不进去
           SOCMK="drivers/soc/oplus/Makefile"
           echo "  --- 修前 ---"; cat "$SOCMK" 2>/dev/null; echo "[EOF]"
-          # 无条件重写为正确内容（原文件只有 healthinfo，且可能无结尾换行）
-          printf 'obj-y += healthinfo/\nobj-y += system/\n' > "$SOCMK"
-          ok $? "drivers/soc/oplus/Makefile 重写"
+          # drivers/soc/Makefile 已有 obj-y += oplus/system/，此处无需再加 system/
+          # 保留原内容，只在缺失时补 healthinfo（原文件本来就该有）
+          if ! grep -q 'healthinfo/' "$SOCMK" 2>/dev/null; then
+            printf 'obj-y += healthinfo/\n' >> "$SOCMK"
+          fi
           echo "  --- 修后 ---"; cat "$SOCMK"; echo "[EOF]"
-          grep -q 'obj-y += system/' "$SOCMK" \
-            && echo "  [ok]   已含 system/" \
-            || { echo "  [FAIL] system/ 未写入"; fail=1; }
+
+          # ★ 真正的根因：system/Kconfig 没 source oplus_project/Kconfig
+          # 导致 CONFIG_OPLUS_FEATURE_OPROJECT 是未声明 symbol，写进 .config 会被丢弃
+          SYSKC="drivers/soc/oplus/system/Kconfig"
+          echo "  --- $SYSKC 修前是否 source oplus_project ---"
+          grep -c 'oplus_project/Kconfig' "$SYSKC" 2>/dev/null || echo 0
+          if [ -f "$SYSKC" ] && ! grep -q 'oplus_project/Kconfig' "$SYSKC"; then
+            printf '\nsource "drivers/soc/oplus/system/oplus_project/Kconfig"\n' >> "$SYSKC"
+            ok $? "$SYSKC 追加 source oplus_project/Kconfig"
+          fi
+          echo "  --- 修后尾部 ---"; tail -5 "$SYSKC"; echo "[EOF]"
+          grep -q 'oplus_project/Kconfig' "$SYSKC" \
+            && echo "  [ok]   Kconfig 已 source" \
+            || { echo "  [FAIL] Kconfig 未 source"; fail=1; }
+          # 确认 oplus_project/Kconfig 里定义了该 symbol
+          test -f drivers/soc/oplus/system/oplus_project/Kconfig \
+            && grep -q 'OPLUS_FEATURE_OPROJECT' drivers/soc/oplus/system/oplus_project/Kconfig \
+            && echo "  [ok]   oplus_project/Kconfig 定义了 OPLUS_FEATURE_OPROJECT" \
+            || { echo "  [FAIL] oplus_project/Kconfig 异常"; fail=1; }
           test -d drivers/soc/oplus/system/oplus_project \
             && echo "  [ok]   system/oplus_project 可访问" \
             || { echo "  [FAIL] system/oplus_project 不存在"; fail=1; }

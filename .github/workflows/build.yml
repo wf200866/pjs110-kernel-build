@@ -98,30 +98,41 @@ jobs:
             ok $? "tp_devices.h 补 TP_VXN"
           fi
 
-          echo "===== E. 桩头文件 ====="
+          echo "===== E. 头部 + 编译挂载 ====="
           mkdir -p include/soc/oplus/system
           printf '%s\n' '#ifndef _OPPO_PROCESS_H_' '#define _OPPO_PROCESS_H_' \
             '#include <linux/types.h>' 'struct pid;' \
             'static inline bool oppo_is_android_core_group(struct pid *pgrp) { return false; }' \
             '#endif' > include/soc/oplus/system/oppo_process.h
-          # 注意：不能造桩！vendor 里有真头文件 + 真 .c 实体
-          # 两个名字都要有：调用方 include 的是 oppo_project.h，vendor 真名是 oplus_project.h
+          # --- 根因：drivers/soc/oplus/Makefile 是 0 字节空文件 ---
+          # drivers/soc/oplus/system -> vendor/oplus/kernel/system 链接已存在
+          # 但空 Makefile 导致 system/ 从不被递归，oplus_project 永远编不进去
+          SOCMK="drivers/soc/oplus/Makefile"
+          echo "  --- 修前 $SOCMK ($(wc -c < "$SOCMK" 2>/dev/null || echo ?) 字节) ---"
+          cat "$SOCMK" 2>/dev/null || true
+          if [ ! -s "$SOCMK" ] || ! grep -q '^obj-.*system/' "$SOCMK" 2>/dev/null; then
+            printf 'obj-y += system/\n' >> "$SOCMK"
+            ok $? "drivers/soc/oplus/Makefile 追加 obj-y += system/"
+          fi
+          echo "  --- 修后 ---"
+          cat "$SOCMK"
+          test -d drivers/soc/oplus/system/oplus_project \
+            && echo "  [ok]   system/oplus_project 可访问" \
+            || { echo "  [FAIL] system/oplus_project 不存在"; fail=1; }
+          test -f drivers/soc/oplus/system/Makefile \
+            && echo "  [ok]   system/Makefile 存在（内含 OPROJECT 分支）" \
+            || { echo "  [FAIL] system/Makefile 缺失"; fail=1; }
+          # 两个头文件名字都链到 vendor 真头文件
           rm -f include/soc/oplus/system/oppo_project.h
           SRC_PJ="$V/oplus/kernel/boot/include/oplus_project.h"
+          [ -f "$SRC_PJ" ] || SRC_PJ="$V/oplus/kernel/system/include/oplus_project.h"
           if [ -f "$SRC_PJ" ]; then
             ln -sf "$SRC_PJ" include/soc/oplus/system/oplus_project.h
             ln -sf "$SRC_PJ" include/soc/oplus/system/oppo_project.h
-            echo "  [ok]   两个名字都链到 vendor 真头文件"
+            echo "  [ok]   两个名字链到 $(basename $(dirname $(dirname $SRC_PJ)))/include/oplus_project.h"
           else
-            echo "  [FAIL] 找不到 $SRC_PJ"; fail=1
+            echo "  [FAIL] 找不到 vendor 的 oplus_project.h"; fail=1
           fi
-          for h in oplus_project.h oppo_project.h; do
-            if [ -f "include/soc/oplus/system/$h" ]; then
-              echo "  [ok]   $h 可读 ($(grep -c get_eng_version "include/soc/oplus/system/$h") 处 get_eng_version)"
-            else
-              echo "  [FAIL] $h 不可读"; fail=1
-            fi
-          done
           [ -f include/scp.h ] || printf '%s\n' '#ifndef _SCP_FORWARD_H_' \
             '#define _SCP_FORWARD_H_' \
             '#include <../drivers/misc/mediatek/scp/include/scp.h>' \

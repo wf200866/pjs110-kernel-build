@@ -56,7 +56,13 @@ jobs:
             'static inline bool oppo_is_android_core_group(struct pid *pgrp) { return false; }' \
             '#endif' > include/soc/oplus/system/oppo_process.h
           echo "=== oppo_process.h stub created ==="
-          # zram_drv_internal.h 的 extern inline 声明修复（函数体在 .c 里）
+          # touch.c 用到 TP_VXN 但 vendor 的 tp_devices.h 没定义（OPPO 源码版本不一致）
+          TPDEV="$PARENT/vendor/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"
+          if [ -f "$TPDEV" ] && ! grep -q "TP_VXN" "$TPDEV"; then
+            sed -i 's/^    TP_TXD,/    TP_TXD,\n    TP_VXN,/' "$TPDEV"
+            echo "=== added TP_VXN to tp_devices.h ==="
+            grep -n "TP_TXD\|TP_VXN" "$TPDEV"
+          fi
           sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' drivers/block/zram/zram_drv_internal.h 2>/dev/null || true
           sed -i 's/^extern inline bool is_thp_zram/extern bool is_thp_zram/' drivers/block/zram/zram_drv_internal.h 2>/dev/null || true
           grep -n "zram_page_state\|is_thp_zram" drivers/block/zram/zram_drv_internal.h 2>/dev/null | head -2

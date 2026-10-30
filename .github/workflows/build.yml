@@ -22,6 +22,14 @@ jobs:
           rm -f vendor.tar.gz
           cd "$GITHUB_WORKSPACE"
           ls kernel/sched_assist/Kconfig && echo "SYMLINK_OK"
+          # OPPO 的 vendor 代码里用 ../../../../kernel-4.19/ 相对路径引用内核自身，造这个链接
+          cd "$PARENT"
+          if [ ! -e kernel-4.19 ]; then
+            ln -s "$(basename "$GITHUB_WORKSPACE")" kernel-4.19
+            echo "=== created kernel-4.19 symlink ==="
+          fi
+          ls -la kernel-4.19/ | head -3
+          cd "$GITHUB_WORKSPACE"
 
       - name: Download stock config
         run: |
@@ -85,7 +93,7 @@ jobs:
           mkdir -p out
           cp out.config out/.config
           # 直接编译，不跑 olddefconfig（原厂 config 可能含 OPPO 特有 symbol，olddefconfig 会因缺失 Kconfig 报错）
-          make O=out ARCH=arm64 -j$(nproc) Image.gz KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size"
+          make O=out ARCH=arm64 -j$(nproc) Image.gz KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member"
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4

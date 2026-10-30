@@ -12,158 +12,205 @@ jobs:
         with:
           repository: oppo-source/android_kernel_oppo_mt6833
           ref: oppo/mt6833_t_13.1.1_a2x_5g
+          fetch-depth: 1
 
-      - name: Download OPPO vendor modules
+      - name: Vendor + kernel-4.19 symlink
         run: |
+          set -u
           PARENT=$(dirname "$GITHUB_WORKSPACE")
           cd "$PARENT"
-          curl -L -o vendor.tar.gz https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/vendor.tar.gz
+          curl -sL -o vendor.tar.gz \
+            https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/vendor.tar.gz
           tar xzf vendor.tar.gz
           rm -f vendor.tar.gz
+          du -sh "$PARENT/vendor" || true
+          [ -e kernel-4.19 ] || ln -s "$(basename "$GITHUB_WORKSPACE")" kernel-4.19
           cd "$GITHUB_WORKSPACE"
-          ls kernel/sched_assist/Kconfig && echo "SYMLINK_OK"
-          # OPPO 的 vendor 代码里用 ../../../../kernel-4.19/ 相对路径引用内核自身，造这个链接
-          cd "$PARENT"
-          if [ ! -e kernel-4.19 ]; then
-            ln -s "$(basename "$GITHUB_WORKSPACE")" kernel-4.19
-            echo "=== created kernel-4.19 symlink ==="
-          fi
-          ls -la kernel-4.19/ | head -3
-          cd "$GITHUB_WORKSPACE"
+          echo "=== symlink 自检 ==="
+          test -f kernel/sched_assist/Kconfig && echo "  OK kernel/sched_assist/Kconfig" || echo "  BREAK sched_assist"
+          test -f include/linux/sched_assist/sched_assist_binder.h && echo "  OK binder.h" || echo "  BREAK binder.h"
 
-      - name: Download stock config
+      - name: Stock config
         run: |
-          curl -L -o /tmp/stock.config https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/pjs110_stock.config
+          curl -sL -o /tmp/stock.config \
+            https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/pjs110_stock.config
           wc -l /tmp/stock.config
 
-      - name: Install toolchain
+      - name: Toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y make libncurses-dev flex bison libssl-dev bc gcc-aarch64-linux-gnu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq make libncurses-dev flex bison libssl-dev bc \
+                                    gcc-aarch64-linux-gnu cpio
 
-      - name: Prepare config
+      - name: Patch OPPO source defects
         run: |
-          # 先删掉 OPPO 开源缺失的 Kconfig 引用（无论用哪种 config 都要删）
+          set -u
+          V="$(dirname "$GITHUB_WORKSPACE")/vendor"
+          fail=0
+          ok()  { if [ "$1" = "0" ]; then echo "  [ok]   $2"; else echo "  [FAIL] $2"; fail=1; fi; }
+
+          echo "===== A. fs/proc/Kconfig 去掉 cpu_jankinfo ====="
           sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
-          echo "=== fixed missing Kconfig refs ==="
-          # 修复 OPPO 头文件的 inline 声明（函数体在 .c 里，gcc 报 always_inline 错）
-          sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h
-          sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h
-          sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h
-          sed -i 's/^inline void blk_crypto_flock/extern void blk_crypto_flock/' include/linux/blk-crypto.h
-          sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h
-          sed -i 's/^extern inline bool is_audio_task/extern bool is_audio_task/' include/linux/sched_assist/sched_assist_binder.h 2>/dev/null || true
-          sed -i 's/^inline bool oplus_ofp_is_support/extern bool oplus_ofp_is_support/' drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.h 2>/dev/null || true
-          # sensor_devinfo.c 的 prototype declaration 错误（旧代码用旧风格声明）
-          sed -i 's/^int sensor_devinfo_init(/static int sensor_devinfo_init(/' "$(dirname "$GITHUB_WORKSPACE")/vendor/oplus/sensor/kernel/oplus_sensor_devinfo/sensor_devinfo.c" 2>/dev/null || true
-          for f in drivers/misc/mediatek/sensor/2.0/oplus_sensor_devinfo/sensor_devinfo.c; do
-            [ -f "$f" ] && sed -i '48s/^/\/\/ /' "$f" 2>/dev/null || true
-          done
-          echo "=== inline decls fixed ==="
-          # 造 OPPO 缺失头文件的桩（oppo_process.h）
+          ok $? "fs/proc/Kconfig"
+
+          echo "===== B. core 头文件 inline 声明 ====="
+          sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h 2>/dev/null || true
+          sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h 2>/dev/null || true
+          sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h 2>/dev/null || true
+          sed -i 's/^inline void blk_crypto_flock/extern void blk_crypto_flock/' include/linux/blk-crypto.h 2>/dev/null || true
+
+          echo "===== C1. sensor_devinfo.c 空参数定义 vs 原型 【本次真卡点】 ====="
+          # 原型: int register_lcdinfo_notifier(struct notifier_block *nb);
+          # 定义: __attribute__((weak)) int register_lcdinfo_notifier() {   <- K&R 空参数，冲突
+          SDI="$V/oplus/sensor/kernel/oplus_sensor_devinfo/sensor_devinfo.c"
+          if [ -f "$SDI" ]; then
+            sed -i 's/^__attribute__((weak)) int register_lcdinfo_notifier() {/__attribute__((weak)) int register_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
+            sed -i 's/^__attribute__((weak)) int unregister_lcdinfo_notifier() {/__attribute__((weak)) int unregister_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
+            ok $? "sensor_devinfo.c 两处空参数补原型"
+            echo "  --- 改后 ---"
+            grep -n 'lcdinfo_notifier' "$SDI" | head -6
+          else
+            echo "  [FAIL] 缺 $SDI"; fail=1
+          fi
+          # sensorhub 版同款，一起修（不存在的分支不会编进来，但先修无妨）
+          SDI2="$V/oplus/sensor/kernel/sensorhub/oplus_sensor_devinfo/sensor_devinfo.c"
+          if [ -f "$SDI2" ]; then
+            sed -i 's/^__attribute__((weak)) int register_lcdinfo_notifier() {/__attribute__((weak)) int register_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI2"
+            sed -i 's/^__attribute__((weak)) int unregister_lcdinfo_notifier() {/__attribute__((weak)) int unregister_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI2"
+            echo "  [ok]   sensorhub 版同步修"
+          fi
+
+          echo "===== C2. is_audio_task (gnu89 inline 不发射外部符号) ====="
+          BINDER="$V/oplus/kernel/oplus_performance/sched_assist/sched_assist_binder.h"
+          SAC="$V/oplus/kernel/oplus_performance/sched_assist/sched_assist_common.c"
+          if [ -f "$BINDER" ]; then
+            sed -i 's/^extern inline bool is_audio_task/extern bool is_audio_task/' "$BINDER"
+            ok $? "binder.h extern inline -> extern"
+          else
+            echo "  [FAIL] 缺 $BINDER"; fail=1
+          fi
+          if [ -f "$SAC" ]; then
+            sed -i 's/^inline bool is_audio_task(struct task_struct \*task)/bool is_audio_task(struct task_struct *task)/' "$SAC"
+            ok $? "common.c inline 定义 -> 普通"
+          fi
+
+          echo "===== C3. zram ====="
+          ZH="$V/oplus/kernel/mm/hybridswap_zram/zram_drv_internal.h"
+          ZC="$V/oplus/kernel/mm/hybridswap_zram/zram_drv.c"
+          [ -f "$ZH" ] && {
+            sed -i 's/^extern inline bool is_chp_zram/extern bool is_chp_zram/' "$ZH"
+            sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' "$ZH"
+            ok $? "zram_drv_internal.h 两处声明"
+          }
+          [ -f "$ZC" ] && {
+            sed -i 's/^inline bool is_chp_zram(struct zram \*zram)/bool is_chp_zram(struct zram *zram)/' "$ZC"
+            sed -i 's/^inline unsigned long zram_page_state(struct zram \*zram, int type)/unsigned long zram_page_state(struct zram *zram, int type)/' "$ZC"
+            ok $? "zram_drv.c 两处定义"
+          }
+
+          echo "===== C4. is_dma_buf_file（内核树已有实体，删多余声明） ====="
+          MH="$V/oplus/kernel/mm/mm_osvelte/memstat.h"
+          [ -f "$MH" ] && { sed -i '/^extern inline int is_dma_buf_file/d' "$MH"; ok $? "memstat.h 删行"; }
+
+          echo "===== C5. vm_mmap_pgoff_with_check（实体 static inline） ====="
+          RH="$V/oplus/kernel/oplus_performance/gloom/resmap_account.h"
+          [ -f "$RH" ] && {
+            perl -0pi -e 's/^extern inline unsigned long vm_mmap_pgoff_with_check\([^;]*?\);/\/* entity is static inline in resmap_account.c *\/ /ms' "$RH"
+            ok $? "resmap_account.h 删声明"
+          }
+
+          echo "===== C6. ws_all_release（文件内无实体） ====="
+          WM="$V/oplus/kernel/wakelock_profiler/oplus_wakelock_profiler_mtk.c"
+          [ -f "$WM" ] && { sed -i '/^extern inline bool ws_all_release(void);$/d' "$WM"; ok $? "wakelock_profiler_mtk.c 删行"; }
+
+          echo "===== D. 其他 ====="
+          SY="$V/oplus/kernel/charger/v1/voocphy/oplus_sy6529.c"
+          [ -f "$SY" ] && {
+            sed -i 's/if (\*data == sy6529_CHARGE_MODE_2_1 | \*data == sy6529_CHARGE_MODE_1_1)/if ((*data == sy6529_CHARGE_MODE_2_1) | (*data == sy6529_CHARGE_MODE_1_1))/' "$SY"
+            ok $? "sy6529 括号优先级"
+          }
+          TP="$V/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"
+          if [ -f "$TP" ] && ! grep -q TP_VXN "$TP"; then
+            sed -i 's/^    TP_TXD,/    TP_TXD,\n    TP_VXN,/' "$TP"
+            ok $? "tp_devices.h 补 TP_VXN"
+          fi
+
+          echo "===== E. 桩头文件 ====="
           mkdir -p include/soc/oplus/system
-          printf '%s\n' \
-            '#ifndef _OPPO_PROCESS_H_' \
-            '#define _OPPO_PROCESS_H_' \
-            '#include <linux/types.h>' \
-            'struct pid;' \
+          printf '%s\n' '#ifndef _OPPO_PROCESS_H_' '#define _OPPO_PROCESS_H_' \
+            '#include <linux/types.h>' 'struct pid;' \
             'static inline bool oppo_is_android_core_group(struct pid *pgrp) { return false; }' \
             '#endif' > include/soc/oplus/system/oppo_process.h
-          # oppo_project.h 也缺（flashlight 等驱动用到）
-          printf '%s\n' \
-            '#ifndef _OPPO_PROJECT_H_' \
-            '#define _OPPO_PROJECT_H_' \
+          printf '%s\n' '#ifndef _OPPO_PROJECT_H_' '#define _OPPO_PROJECT_H_' \
             '#include <linux/types.h>' \
             'static inline int get_project(void) { return 20015; }' \
             'static inline int get_PCB_Version(void) { return 0; }' \
             '#endif' > include/soc/oplus/system/oppo_project.h
-          echo "=== oppo_process.h + oppo_project.h stubs created ==="
-          # sensor_feedback.c 从 vendor include scp_helper.h，但缺 -I scp/include，做个全局转发头
-          if [ ! -f include/scp.h ]; then
-            printf '%s\n' \
-              '#ifndef _SCP_FORWARD_H_' \
-              '#define _SCP_FORWARD_H_' \
-              '#include <../drivers/misc/mediatek/scp/include/scp.h>' \
-              '#endif' > include/scp.h
-            echo "=== created include/scp.h forwarder ==="
-          fi
-          # 一劳永逸：把源码树里所有 -Werror 改成 -Wno-error（OPPO/MTK 老代码在新 gcc 下 Werror 太多）
-          # 三种写法都要正确转换：
-          #   -Werror=foo  -> -Wno-error=foo
-          #   -Werror-foo  -> -Wno-error=foo   (gcc 只认等号形式)
-          #   -Werror      -> -Wno-error
-          grep -rl -- "-Werror" --include=Makefile --include=Kbuild --include="*.mk" . 2>/dev/null | while read f; do
+          [ -f include/scp.h ] || printf '%s\n' '#ifndef _SCP_FORWARD_H_' \
+            '#define _SCP_FORWARD_H_' \
+            '#include <../drivers/misc/mediatek/scp/include/scp.h>' \
+            '#endif' > include/scp.h
+          ok $? "三个桩头文件"
+
+          echo "===== F. -Werror -> -Wno-error ====="
+          grep -rl -- "-Werror" --include=Makefile --include=Kbuild --include="*.mk" . 2>/dev/null | while read -r f; do
             sed -i 's/-Werror=/-Wno-error=/g; s/-Werror-\([A-Za-z0-9_-]*\)/-Wno-error=\1/g; s/\(^\|[[:space:]]\)-Werror\([[:space:]]\|$\)/\1-Wno-error\2/g' "$f"
           done
-          echo "=== converted ==="
-          grep -rn -- "-Werror" --include=Makefile . 2>/dev/null | head -2 || echo "none left"
-          # 修 oplus_sy6529.c 的 | 优先级问题（-Werror=parentheses 无法通过 KCFLAGS 压制）
-          SY6529="$(dirname "$GITHUB_WORKSPACE")/vendor/oplus/kernel/charger/v1/voocphy/oplus_sy6529.c"
-          if [ -f "$SY6529" ]; then
-            sed -i 's/if (\*data == sy6529_CHARGE_MODE_2_1 | \*data == sy6529_CHARGE_MODE_1_1)/if ((*data == sy6529_CHARGE_MODE_2_1) | (*data == sy6529_CHARGE_MODE_1_1))/' "$SY6529"
-            echo "=== fixed sy6529 parentheses ==="
-          fi
-          # touch.c 用到 TP_VXN 但 vendor 的 tp_devices.h 没定义（OPPO 源码版本不一致）
-          TPDEV="$(dirname "$GITHUB_WORKSPACE")/vendor/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"
-          echo "TPDEV=$TPDEV"
-          if [ -f "$TPDEV" ] && ! grep -q "TP_VXN" "$TPDEV"; then
-            sed -i 's/^    TP_TXD,/    TP_TXD,\n    TP_VXN,/' "$TPDEV"
-            echo "=== added TP_VXN ==="
-          fi
-          grep -c "TP_VXN" "$TPDEV" 2>/dev/null || echo "TPDEV not found"
-          sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' drivers/block/zram/zram_drv_internal.h 2>/dev/null || true
-          sed -i 's/^extern inline bool is_thp_zram/extern bool is_thp_zram/' drivers/block/zram/zram_drv_internal.h 2>/dev/null || true
-          grep -n "zram_page_state\|is_thp_zram" drivers/block/zram/zram_drv_internal.h 2>/dev/null | head -2
+          echo "  剩余 -Werror: $(grep -rn -- '-Werror' --include=Makefile . 2>/dev/null | wc -l)"
+
+          echo "===== G. config ====="
           cp /tmp/stock.config out.config
           printf '\nCONFIG_SYSVIPC=y\nCONFIG_SYSVIPC_SYSCTL=y\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_POSIX_MQUEUE=y\n' >> out.config
           sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out.config
           sed -i 's/^CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/' out.config
           sed -i 's/^CONFIG_MODULE_SIG_ALL=y/# CONFIG_MODULE_SIG_ALL is not set/' out.config
-          echo "=== check ==="
-          grep -E "^CONFIG_(SYSVIPC|IPC_NS|USER_NS|CGROUP_PIDS|DEVTMPFS)=" out.config
-          grep -E "^# CONFIG_MODULE_SIG" out.config
 
-      - name: Build kernel
+          echo "===== H. 自检 ====="
+          grep -rn '^extern inline' "$V" --include=*.h --include=*.c 2>/dev/null | head -5 || echo "  extern inline 残留 0"
+          grep -E "^CONFIG_(SYSVIPC|IPC_NS|USER_NS|CGROUP_PIDS|DEVTMPFS|POSIX_MQUEUE)=" out.config || true
+
+          [ "$fail" -eq 0 ] && echo "ALL PATCHES OK" || { echo "!! 有必改项失败"; exit 1; }
+
+      - name: Build
         run: |
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          mkdir -p out
+          export ARCH=arm64 SUBARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
           cp out.config out/.config
-          # 直接编译，不跑 olddefconfig（原厂 config 可能含 OPPO 特有 symbol，olddefconfig 会因缺失 Kconfig 报错）
-          make O=out ARCH=arm64 -j$(nproc) Image.gz \
-            KCFLAGS="-I$PWD/drivers/misc/mediatek/scp/include -I$PWD/drivers/misc/mediatek/include -Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces -Wno-error=builtin-declaration-mismatch" \
-            > /tmp/build.log 2>&1
-          BUILD_EXIT=$?
-          echo "=== BUILD EXIT: $BUILD_EXIT ==="
-          echo "=== 关键错误摘要 ==="
-          grep -E "error:|fatal error" /tmp/build.log | grep -v "TPD_INFO\|printk\|dev_info\|dev_err" | tail -20
-          echo "=== 产物检查 ==="
-          ls -la out/arch/arm64/boot/ 2>&1 | head -12
-          if [ $BUILD_EXIT -ne 0 ]; then exit 1; fi
+          KCF="-I$PWD/drivers/misc/mediatek/scp/include -I$PWD/drivers/misc/mediatek/include -Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces -Wno-error=builtin-declaration-mismatch"
+          set +e
+          make O=out ARCH=arm64 -j$(nproc) Image.gz KCFLAGS="$KCF" > /tmp/build.log 2>&1
+          RC=$?
+          set -e
+          echo "=== BUILD EXIT: $RC ==="
+          echo "=== error 行（最多 80） ==="
+          grep -E "error:|fatal error:" /tmp/build.log | head -80 || true
+          echo "=== 最后 25 行 ==="
+          tail -25 /tmp/build.log || true
+          echo "=== out/arch/arm64/boot ==="
+          ls -la out/arch/arm64/boot/ 2>&1 | head -20 || true
+          if [ "$RC" -ne 0 ]; then exit 1; fi
 
-      - name: Package kernel image
+      - name: Package
+        if: always()
         run: |
-          cd out/arch/arm64/boot
-          ls -la
-          # 找出内核镜像（Image / Image.gz / Image.lz4 都有可能）
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cd out/arch/arm64/boot 2>/dev/null || { echo "no boot dir"; exit 0; }
           if [ -f Image.gz ]; then
-            cp Image.gz "$GITHUB_WORKSPACE/kernel_Image.gz"; echo "using Image.gz"
+            cp Image.gz "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"; echo "used Image.gz"
           elif [ -f Image ]; then
-            gzip -c Image > "$GITHUB_WORKSPACE/kernel_Image.gz"; echo "gzipped Image"
+            gzip -9 -c Image > "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"; echo "gzipped Image"
+            cp Image "$GITHUB_WORKSPACE/artifacts/kernel_Image.raw"
           else
-            echo "!! 没找到内核镜像"; exit 1
+            echo "!! 无内核镜像"
           fi
-          ls -la "$GITHUB_WORKSPACE/kernel_Image.gz"
-          # 保存 config 和 System.map 备查
-          cp "$GITHUB_WORKSPACE/out/.config" "$GITHUB_WORKSPACE/kernel.config" 2>/dev/null || true
-          cp System.map "$GITHUB_WORKSPACE/kernel.System.map" 2>/dev/null || true
+          ls -la "$GITHUB_WORKSPACE/artifacts/" || true
+          cp "$GITHUB_WORKSPACE/out/.config" "$GITHUB_WORKSPACE/artifacts/kernel.config" 2>/dev/null || true
+          cp System.map "$GITHUB_WORKSPACE/artifacts/kernel.System.map" 2>/dev/null || true
+          cp /tmp/build.log "$GITHUB_WORKSPACE/artifacts/build.log" 2>/dev/null || true
 
-      - name: Upload kernel
+      - name: Upload
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-image
-          path: |
-            kernel_Image.gz
-            kernel.config
-            kernel.System.map
+          name: kernel-output
+          path: artifacts/
+          if-no-files-found: warn

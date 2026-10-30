@@ -35,6 +35,9 @@ jobs:
 
       - name: Prepare config
         run: |
+          # 先删掉 OPPO 开源缺失的 Kconfig 引用（无论用哪种 config 都要删）
+          sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
+          echo "=== fixed missing Kconfig refs ==="
           cp /tmp/stock.config out.config
           printf '\nCONFIG_SYSVIPC=y\nCONFIG_SYSVIPC_SYSCTL=y\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_POSIX_MQUEUE=y\n' >> out.config
           sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out.config
@@ -51,8 +54,8 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           mkdir -p out
           cp out.config out/.config
-          make O=out ARCH=arm64 olddefconfig
-          make O=out -j$(nproc) KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=deprecated-declarations"
+          # 直接编译，不跑 olddefconfig（原厂 config 可能含 OPPO 特有 symbol，olddefconfig 会因缺失 Kconfig 报错）
+          make O=out ARCH=arm64 -j$(nproc) KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=deprecated-declarations"
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4

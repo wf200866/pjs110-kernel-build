@@ -74,12 +74,15 @@ jobs:
             '#endif' > include/soc/oplus/system/oppo_project.h
           echo "=== oppo_process.h + oppo_project.h stubs created ==="
           # 一劳永逸：把源码树里所有 -Werror 改成 -Wno-error（OPPO/MTK 老代码在新 gcc 下 Werror 太多）
+          # 三种写法都要正确转换：
+          #   -Werror=foo  -> -Wno-error=foo
+          #   -Werror-foo  -> -Wno-error=foo   (gcc 只认等号形式)
+          #   -Werror      -> -Wno-error
           grep -rl -- "-Werror" --include=Makefile --include=Kbuild --include="*.mk" . 2>/dev/null | while read f; do
-            # 只替换 -Werror=xxx -> -Wno-error=xxx（保留等号），以及独立的 -Werror
-            sed -i 's/-Werror=/-Wno-error=/g; s/-Werror\([^=]\)/-Wno-error\1/g' "$f"
+            sed -i 's/-Werror=/-Wno-error=/g; s/-Werror-\([A-Za-z0-9_-]*\)/-Wno-error=\1/g; s/\(^\|[[:space:]]\)-Werror\([[:space:]]\|$\)/\1-Wno-error\2/g' "$f"
           done
-          echo "=== all -Werror converted to -Wno-error ==="
-          grep -rn -- "-Werror=" --include=Makefile . 2>/dev/null | head -2 || echo "done"
+          echo "=== converted ==="
+          grep -rn -- "-Werror" --include=Makefile . 2>/dev/null | head -2 || echo "none left"
           # 修 oplus_sy6529.c 的 | 优先级问题（-Werror=parentheses 无法通过 KCFLAGS 压制）
           SY6529="$(dirname "$GITHUB_WORKSPACE")/vendor/oplus/kernel/charger/v1/voocphy/oplus_sy6529.c"
           if [ -f "$SY6529" ]; then

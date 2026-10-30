@@ -15,10 +15,17 @@ jobs:
 
       - name: Download OPPO vendor modules
         run: |
-          curl -L -o /tmp/vendor.tar.gz https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/vendor.tar.gz
-          tar xzf /tmp/vendor.tar.gz
-          # vendor 解压后是 vendor/ 目录，symlink 指向 ../../../vendor/... 会自动生效
-          ls -la vendor/oplus/kernel/oplus_performance/sched_assist/ | head -5
+          # vendor 必须放在内核源码的兄弟目录（symlink 用 ../../vendor 相对路径）
+          PARENT=$(dirname "$GITHUB_WORKSPACE")
+          cd "$PARENT"
+          curl -L -o vendor.tar.gz https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/vendor.tar.gz
+          tar xzf vendor.tar.gz
+          rm -f vendor.tar.gz
+          echo "vendor 放在: $PARENT/vendor"
+          ls "$PARENT/vendor/oplus/kernel/oplus_performance/sched_assist/" | head -5
+          # 验证 symlink 能解析
+          cd "$GITHUB_WORKSPACE"
+          ls kernel/sched_assist/Kconfig && echo "SYMLINK_OK" || echo "SYMLINK_BROKEN"
 
       - name: Install cross toolchain (gcc-11, more tolerant of legacy code)
         run: |

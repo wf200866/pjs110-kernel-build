@@ -104,6 +104,15 @@ jobs:
           sed -i 's/CONFIG_MODULE_SIG_FORCE=y/CONFIG_MODULE_SIG_FORCE=n/' $DEF
           sed -i 's/CONFIG_MODULE_SIG_ALL=y/CONFIG_MODULE_SIG_ALL=n/' $DEF
 
+          # 终极方案：清空 OPLUS feature set（这些闭源模块源码不全，且与 Droidspaces 无关）
+          if [ -f oplus_native_features.mk ]; then
+            cp oplus_native_features.mk oplus_native_features.mk.bak
+            sed -i 's/^OPLUS_NATIVE_FEATURE_SET=.*/OPLUS_NATIVE_FEATURE_SET=/' oplus_native_features.mk
+            sed -i 's/^OPLUS_NATIVE_MACRO_FEATURES=.*/OPLUS_NATIVE_MACRO_FEATURES=/' oplus_native_features.mk
+            echo "cleared OPLUS feature sets"
+            grep -E "^OPLUS_NATIVE" oplus_native_features.mk | head -3
+          fi
+
           # 删掉 OPPO 开源漏掉的 cpu_jankinfo Kconfig 引用（这个文件 vendor 里也没有）
           sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
 
@@ -128,6 +137,9 @@ jobs:
           # 修 OPPO 头文件的 extern inline 声明问题（函数体在别处，gcc-11 报 always_inline 错误）
           sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h
           sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h
+          sed -i 's/^static inline.*ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h
+          # 兜底：把 keyslot-manager.h 里的 inline 声明统一去掉（该函数体在 security/keys 里）
+          sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h
 
       - name: Build kernel
         run: |

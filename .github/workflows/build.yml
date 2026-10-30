@@ -42,7 +42,8 @@ jobs:
           sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h
           sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h
           sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h
-          sed -i 's/^inline bool blk_crypto_flock/extern bool blk_crypto_flock/' include/linux/blk-crypto.h
+          sed -i 's/^inline void blk_crypto_flock/extern void blk_crypto_flock/' include/linux/blk-crypto.h
+          sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h
           sed -i 's/^extern inline bool is_audio_task/extern bool is_audio_task/' include/linux/sched_assist/sched_assist_binder.h 2>/dev/null || true
           sed -i 's/^inline bool oplus_ofp_is_support/extern bool oplus_ofp_is_support/' drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.h 2>/dev/null || true
           echo "=== inline decls fixed ==="

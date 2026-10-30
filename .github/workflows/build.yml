@@ -125,6 +125,10 @@ jobs:
           # 关掉 IKHEADERS（避免 cross 环境 cpio 问题）
           echo "# CONFIG_IKHEADERS is not set" >> $DEF
 
+          # 修 OPPO 头文件的 extern inline 声明问题（函数体在别处，gcc-11 报 always_inline 错误）
+          sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h
+          sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h
+
       - name: Build kernel
         run: |
           export ARCH=arm64
@@ -134,7 +138,7 @@ jobs:
             k6833v1_64_k419_defconfig
           grep -E "CONFIG_SYSVIPC|CONFIG_OVERLAY_FS|CONFIG_USER_NS|CONFIG_MODULE_SIG" out/.config
           make O=out -j$(nproc) WERROR=0 \
-            KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=deprecated-declarations -Wno-error=incompatible-pointer-types -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=main -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement"
+            KCFLAGS="-Wno-error -fgnu89-inline -Wno-error=strict-prototypes -Wno-error=deprecated-declarations -Wno-error=incompatible-pointer-types -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=main -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline"
 
       - name: Upload kernel image
         uses: actions/upload-artifact@v4

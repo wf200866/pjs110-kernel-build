@@ -170,12 +170,13 @@ jobs:
           sed -i 's/^extern inline bool is_audio_task/extern bool is_audio_task/' include/linux/sched_assist/sched_assist_binder.h 2>/dev/null || true
           grep -n "is_audio_task" include/linux/sched_assist/sched_assist_binder.h 2>/dev/null | head -2
 
-          # 修 OPPO 头文件的 extern inline 声明问题（函数体在别处，gcc-11 报 always_inline 错误）
-          sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h
-          sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h
-          sed -i 's/^static inline.*ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h
-          # 兜底：把 keyslot-manager.h 里的 inline 声明统一去掉（该函数体在 security/keys 里）
-          sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h
+          # 通用修复：把所有 OPPO 头文件里的 inline 函数声明（无函数体）改成 extern 声明
+          for f in $(grep -rl "extern inline" drivers/gpu/drm/oplus/ include/ 2>/dev/null | head -50); do
+            sed -i 's/^extern inline /extern /' "$f"
+          done
+          # 针对具体报错的头文件
+          sed -i 's/^static inline bool oplus_ofp_is_support/extern bool oplus_ofp_is_support/' drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.h 2>/dev/null || true
+          sed -i 's/^inline bool oplus_ofp_is_support/extern bool oplus_ofp_is_support/' drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.h 2>/dev/null || true
 
       - name: Build kernel
         run: |

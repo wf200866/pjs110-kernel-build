@@ -87,6 +87,31 @@ jobs:
           }
 
           echo "===== D. 其他 ====="
+          # is_key_process: 内核树 signal.c 调用它，但 vendor 里是 static（内部链接）
+          # stability_helper 是外部模块(KBUILD_OPTIONS=m)，不会进 vmlinux
+          # 最省事：在 oppo_process.h 里提供 static inline 实现（只用于打日志）
+          PROC_H="include/soc/oplus/system/oppo_process.h"
+          if [ -L "$PROC_H" ]; then rm -f "$PROC_H"; fi
+          printf '%s\n' \
+            '#ifndef _OPPO_PROCESS_H_' \
+            '#define _OPPO_PROCESS_H_' \
+            '#include <linux/types.h>' \
+            '#include <linux/sched.h>' \
+            '#include <linux/pid.h>' \
+            '#include <linux/string.h>' \
+            'static inline bool is_key_process(struct task_struct *t)' \
+            '{' \
+            '	if (!t) return false;' \
+            '	if (!strcmp(t->comm, "init") || !strcmp(t->comm, "system_server")' \
+            '	    || !strcmp(t->comm, "surfaceflinger")' \
+            '	    || !strcmp(t->comm, "servicemanager"))' \
+            '		return true;' \
+            '	return false;' \
+            '}' \
+            'static inline bool oppo_is_android_core_group(struct pid *pgrp) { return false; }' \
+            '#endif' > "$PROC_H"
+          ok $? "oppo_process.h 提供 static inline is_key_process"
+          grep -c 'is_key_process' "$PROC_H"
           SY="$V/oplus/kernel/charger/v1/voocphy/oplus_sy6529.c"
           [ -f "$SY" ] && {
             sed -i 's/if (\*data == sy6529_CHARGE_MODE_2_1 | \*data == sy6529_CHARGE_MODE_1_1)/if ((*data == sy6529_CHARGE_MODE_2_1) | (*data == sy6529_CHARGE_MODE_1_1))/' "$SY"
@@ -100,10 +125,7 @@ jobs:
 
           echo "===== E. 头部 + 编译挂载 ====="
           mkdir -p include/soc/oplus/system
-          printf '%s\n' '#ifndef _OPPO_PROCESS_H_' '#define _OPPO_PROCESS_H_' \
-            '#include <linux/types.h>' 'struct pid;' \
-            'static inline bool oppo_is_android_core_group(struct pid *pgrp) { return false; }' \
-            '#endif' > include/soc/oplus/system/oppo_process.h
+          # oppo_process.h 已在 D 段生成（含 static inline is_key_process），此处不再覆盖
           # --- 根因：drivers/soc/oplus/Makefile 是 0 字节空文件 ---
           # drivers/soc/oplus/system -> vendor/oplus/kernel/system 链接已存在
           # 但空 Makefile 导致 system/ 从不被递归，oplus_project 永远编不进去
@@ -182,8 +204,17 @@ jobs:
           cp /tmp/stock.config out.config
           # Droidspaces 必需
           printf '\nCONFIG_SYSVIPC=y\nCONFIG_SYSVIPC_SYSCTL=y\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_POSIX_MQUEUE=y\n' >> out.config
-          # OPPO 项目信息 + 反馈模块：原厂 config 没开，导致 undefined reference
+          # OPPO 项目信息 + 反馈模块：原厂未开，导致 get_eng_version / oplus_kevent_fb_str 无定义
           printf 'CONFIG_OPLUS_FEATURE_OPROJECT=y\nCONFIG_OPLUS_FEATURE_FEEDBACK=y\n' >> out.config
+          # 内核树 kernel/futex.c 调用 locking_vh_do_futex_handler，
+          # 但 vendor sync/futex.c 只提供 locking_vh_do_futex（无 _handler），名字对不上
+          # → 关掉 CONFIG_OPLUS_LOCKING_STRATEGY，走原生 futex（原厂 kernel 也是这个逻辑）
+          if grep -q '^CONFIG_OPLUS_LOCKING_STRATEGY=' out.config; then
+            sed -i 's/^CONFIG_OPLUS_LOCKING_STRATEGY=.*/# CONFIG_OPLUS_LOCKING_STRATEGY is not set/' out.config
+          else
+            printf '# CONFIG_OPLUS_LOCKING_STRATEGY is not set\n' >> out.config
+          fi
+          echo "  [ok]   LOCKING_STRATEGY 关闭（符号名不匹配）"
           sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out.config
           sed -i 's/^CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/' out.config
           sed -i 's/^CONFIG_MODULE_SIG_ALL=y/# CONFIG_MODULE_SIG_ALL is not set/' out.config

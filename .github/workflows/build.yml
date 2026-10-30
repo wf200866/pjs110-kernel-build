@@ -202,6 +202,18 @@ jobs:
 
           echo "===== G. config ====="
           cp /tmp/stock.config out.config
+          # ★ 致命项：原厂内核 vermagic 是 "4.19.191+"，带加号
+          # 这个 + 来自 kbuild 检测到 git 树有改动时自动追加
+          # 一旦 CI 环境变化（干净 checkout 无改动），+ 就没了
+          # → vermagic 变成 "4.19.191"，与原厂不符 → 所有 vendor .ko 拒载 → 不开机
+          # 所以写死 CONFIG_LOCALVERSION="+"
+          if grep -q '^CONFIG_LOCALVERSION=' out.config; then
+            sed -i 's|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION="+"|' out.config
+          else
+            printf 'CONFIG_LOCALVERSION="+"\n' >> out.config
+          fi
+          grep -n '^CONFIG_LOCALVERSION' out.config
+          echo "  [ok]   LOCALVERSION 固定为 +"
           # Droidspaces 必需
           printf '\nCONFIG_SYSVIPC=y\nCONFIG_SYSVIPC_SYSCTL=y\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_POSIX_MQUEUE=y\n' >> out.config
           # OPPO 项目信息 + 反馈模块：原厂未开，导致 get_eng_version / oplus_kevent_fb_str 无定义
@@ -259,6 +271,21 @@ jobs:
           tail -25 /tmp/build.log || true
           echo "=== out/arch/arm64/boot ==="
           ls -la out/arch/arm64/boot/ 2>&1 | head -20 || true
+
+          # ★ 门禁：vermagic 必须与原厂逐字一致，否则产出物会变砖
+          if [ "$RC" -eq 0 ] && [ -f out/arch/arm64/boot/Image ]; then
+            echo "=== VERMAGIC 门禁 ==="
+            VM=$(strings -a out/arch/arm64/boot/Image | grep -m1 'SMP.*mod_unload' || echo "")
+            echo "  实际: [$VM]"
+            echo "  期望: [4.19.191+ SMP preempt mod_unload modversions aarch64]"
+            if [ "$VM" = "4.19.191+ SMP preempt mod_unload modversions aarch64" ]; then
+              echo "  [PASS] vermagic 与原厂一致"
+            else
+              echo "  [FAIL] vermagic 不符 —— 这份镜像刷了会变砖，中止"
+              exit 1
+            fi
+          fi
+
           if [ "$RC" -ne 0 ]; then exit 1; fi
 
       - name: Package

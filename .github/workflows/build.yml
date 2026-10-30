@@ -174,9 +174,12 @@ jobs:
           for f in $(grep -rl "extern inline" drivers/gpu/drm/oplus/ include/ 2>/dev/null | head -50); do
             sed -i 's/^extern inline /extern /' "$f"
           done
-          # 针对具体报错的头文件
-          sed -i 's/^static inline bool oplus_ofp_is_support/extern bool oplus_ofp_is_support/' drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.h 2>/dev/null || true
+          # 核心头文件的 inline 声明修复（这些函数体在对应 .c 里）
+          sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h
+          sed -i 's/^extern inline bool chp_handle_prctl_user_addrs/extern bool chp_handle_prctl_user_addrs/' include/linux/mm.h
           sed -i 's/^inline bool oplus_ofp_is_support/extern bool oplus_ofp_is_support/' drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.h 2>/dev/null || true
+          echo "=== sched.h uclamp_se_set ==="
+          grep -n "uclamp_se_set" kernel/sched/sched.h | head -2
 
       - name: Build kernel
         run: |

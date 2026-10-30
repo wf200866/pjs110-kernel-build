@@ -75,14 +75,11 @@ jobs:
           echo "=== oppo_process.h + oppo_project.h stubs created ==="
           # 一劳永逸：把源码树里所有 -Werror 改成 -Wno-error（OPPO/MTK 老代码在新 gcc 下 Werror 太多）
           grep -rl -- "-Werror" --include=Makefile --include=Kbuild --include="*.mk" . 2>/dev/null | while read f; do
-            sed -i 's/-Werror/-Wno-error/g' "$f"
-          done
-          # 头文件里的 Werror pragma 也处理
-          grep -rl "Werror" --include="*.h" include/ drivers/ 2>/dev/null | head -20 | while read f; do
-            sed -i 's/-Werror/-Wno-error/g' "$f"
+            # 只替换 -Werror=xxx -> -Wno-error=xxx（保留等号），以及独立的 -Werror
+            sed -i 's/-Werror=/-Wno-error=/g; s/-Werror\([^=]\)/-Wno-error\1/g' "$f"
           done
           echo "=== all -Werror converted to -Wno-error ==="
-          grep -rn -- "-Werror" --include=Makefile . 2>/dev/null | head -3 || echo "no -Werror left in Makefiles"
+          grep -rn -- "-Werror=" --include=Makefile . 2>/dev/null | head -2 || echo "done"
           # 修 oplus_sy6529.c 的 | 优先级问题（-Werror=parentheses 无法通过 KCFLAGS 压制）
           SY6529="$(dirname "$GITHUB_WORKSPACE")/vendor/oplus/kernel/charger/v1/voocphy/oplus_sy6529.c"
           if [ -f "$SY6529" ]; then

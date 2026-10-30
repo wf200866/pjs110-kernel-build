@@ -142,6 +142,21 @@ jobs:
           # 关掉 IKHEADERS（避免 cross 环境 cpio 问题）
           echo "# CONFIG_IKHEADERS is not set" >> $DEF
 
+          # 补齐 OPPO 开源遗漏的头文件（造最小桩，避免编译中断）
+          mkdir -p include/soc/oplus/system
+          printf '%s\n' \
+            '#ifndef _OPPO_PROCESS_H_' \
+            '#define _OPPO_PROCESS_H_' \
+            '#include <linux/types.h>' \
+            'struct pid;' \
+            'static inline bool oppo_is_android_core_group(struct pid *pgrp) { return false; }' \
+            '#endif' > include/soc/oplus/system/oppo_process.h
+          echo "created oppo_process.h stub"
+          head -3 include/soc/oplus/system/oppo_process.h
+
+          # 修 sched_assist_binder.h 的 always_inline 声明
+          sed -i 's/^static.*always_inline.*is_audio_task/static inline bool is_audio_task/' include/linux/sched_assist/sched_assist_binder.h 2>/dev/null || true
+
           # 修 OPPO 头文件的 extern inline 声明问题（函数体在别处，gcc-11 报 always_inline 错误）
           sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h
           sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h

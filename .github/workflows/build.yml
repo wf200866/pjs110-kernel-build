@@ -124,6 +124,11 @@ jobs:
           # 删掉 OPPO 开源漏掉的 cpu_jankinfo Kconfig 引用（这个文件 vendor 里也没有）
           sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
 
+          # 关掉 HYBRIDSWAP（vendor 里 struct hybridswapd_operations 定义不全）
+          sed -i -E 's/^CONFIG_HYBRIDSWAP(=y|=m)/# CONFIG_HYBRIDSWAP is not set/' $DEF
+          sed -i -E 's/^CONFIG_HYBRIDSWAP_[A-Z_]*(=y|=m)/# & is not set/' $DEF
+          sed -i -E 's/^(OPLUS_FEATURE_HYBRIDSWAP)=(yes|y|true)/\1=no/' oplus_native_features.mk 2>/dev/null || true
+
           # 关掉 OPLUS 稳定性/性能模块（OPPO 开源时漏了对应源码文件，会导致编译失败）
           # 这些跟 Droidspaces 功能无关
           for c in OPLUS_SYSTEM_KERNEL OPLUS_FEATURE_OPROJECT OPLUS_FEATURE_FEEDBACK \
@@ -174,7 +179,7 @@ jobs:
             k6833v1_64_k419_defconfig
           grep -E "CONFIG_SYSVIPC|CONFIG_OVERLAY_FS|CONFIG_USER_NS|CONFIG_MODULE_SIG" out/.config
           make O=out -j$(nproc) WERROR=0 \
-            KCFLAGS="-Wno-error -fgnu89-inline -Wno-error=strict-prototypes -Wno-error=deprecated-declarations -Wno-error=incompatible-pointer-types -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=main -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline"
+            KCFLAGS="-Wno-error -fgnu89-inline -Wno-error=strict-prototypes -Wno-error=deprecated-declarations -Wno-error=incompatible-pointer-types -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=main -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=maybe-uninitialized -Wno-error=dangling-pointer -Wno-error=array-bounds -Wno-error=stringop-overflow -Wno-error=stringop-overread -Wno-error=address"
 
       - name: Upload kernel image
         uses: actions/upload-artifact@v4

@@ -25,7 +25,7 @@ jobs:
 
       - name: Download stock kernel config from device image
         run: |
-          curl -L -o /tmp/stock.config ${{ secrets.STOCK_CONFIG_URL || 'https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/pjs110_stock.config' }}
+          curl -L -o /tmp/stock.config https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/pjs110_stock.config
           echo "=== stock config 行数 ==="
           wc -l /tmp/stock.config
           echo "=== 关键项确认 ==="

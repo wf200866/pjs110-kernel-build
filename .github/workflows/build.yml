@@ -136,9 +136,31 @@ jobs:
           tail -5 /tmp/build.log
           echo "=== 编译到哪了 ==="
           grep -oE "  (CC|LD|AR) +[a-zA-Z0-9/_.-]+" /tmp/build.log | tail -3
+          echo "=== 产物检查 ==="
+          ls -la out/arch/arm64/boot/ 2>&1 | head -15
+
+      - name: Package kernel image
+        run: |
+          cd out/arch/arm64/boot
+          ls -la
+          # 找出内核镜像（Image / Image.gz / Image.lz4 都有可能）
+          if [ -f Image.gz ]; then
+            cp Image.gz "$GITHUB_WORKSPACE/kernel_Image.gz"; echo "using Image.gz"
+          elif [ -f Image ]; then
+            gzip -c Image > "$GITHUB_WORKSPACE/kernel_Image.gz"; echo "gzipped Image"
+          else
+            echo "!! 没找到内核镜像"; exit 1
+          fi
+          ls -la "$GITHUB_WORKSPACE/kernel_Image.gz"
+          # 保存 config 和 System.map 备查
+          cp "$GITHUB_WORKSPACE/out/.config" "$GITHUB_WORKSPACE/kernel.config" 2>/dev/null || true
+          cp System.map "$GITHUB_WORKSPACE/kernel.System.map" 2>/dev/null || true
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4
         with:
-          name: Image.gz
-          path: out/arch/arm64/boot/Image.gz
+          name: kernel-image
+          path: |
+            kernel_Image.gz
+            kernel.config
+            kernel.System.map

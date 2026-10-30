@@ -95,17 +95,38 @@ jobs:
           fi
 
           echo "===== C3. zram ====="
+          ZK="drivers/block/zram/zram_drv_internal.h"
+          ZKC="drivers/block/zram/zram_drv.c"
+          if [ -f "$ZK" ]; then
+            sed -i 's/^extern inline bool is_thp_zram/extern bool is_thp_zram/' "$ZK"
+            sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' "$ZK"
+            ok $? "内核树 zram_drv_internal.h 两处声明"
+            echo "  --- 改后 ---"; grep -n 'is_thp_zram\|zram_page_state' "$ZK" | head -4
+          else
+            echo "  [FAIL] 缺 $ZK"; fail=1
+          fi
+          if [ -f "$ZKC" ]; then
+            sed -i 's/^inline unsigned long zram_page_state(struct zram \*zram, int type)/unsigned long zram_page_state(struct zram *zram, int type)/' "$ZKC"
+            sed -i 's/^bool is_thp_zram(struct zram \*zram)/bool is_thp_zram(struct zram *zram)/' "$ZKC"
+            # is_thp_zram 在树里可能已经是非 inline，保险起见再压一次 inline 前缀
+            sed -i 's/^inline bool is_thp_zram(struct zram \*zram)/bool is_thp_zram(struct zram *zram)/' "$ZKC"
+            ok $? "内核树 zram_drv.c 定义去 inline"
+            echo "  --- 改后 ---"; grep -n '^unsigned long zram_page_state\|^bool is_thp_zram\|^inline unsigned long zram_page_state\|^inline bool is_thp_zram' "$ZKC" | head -4
+          else
+            echo "  [FAIL] 缺 $ZKC"; fail=1
+          fi
+          # vendor 侧同款（若有），一起压平，避免双份冲突
           ZH="$V/oplus/kernel/mm/hybridswap_zram/zram_drv_internal.h"
           ZC="$V/oplus/kernel/mm/hybridswap_zram/zram_drv.c"
           [ -f "$ZH" ] && {
             sed -i 's/^extern inline bool is_chp_zram/extern bool is_chp_zram/' "$ZH"
             sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' "$ZH"
-            ok $? "zram_drv_internal.h 两处声明"
+            echo "  [ok]   vendor zram_drv_internal.h"
           }
           [ -f "$ZC" ] && {
             sed -i 's/^inline bool is_chp_zram(struct zram \*zram)/bool is_chp_zram(struct zram *zram)/' "$ZC"
             sed -i 's/^inline unsigned long zram_page_state(struct zram \*zram, int type)/unsigned long zram_page_state(struct zram *zram, int type)/' "$ZC"
-            ok $? "zram_drv.c 两处定义"
+            echo "  [ok]   vendor zram_drv.c"
           }
 
           echo "===== C4. is_dma_buf_file（内核树已有实体，删多余声明） ====="

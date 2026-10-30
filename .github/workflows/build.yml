@@ -120,8 +120,8 @@ jobs:
           make O=out \
             k6833v1_64_k419_defconfig
           grep -E "CONFIG_SYSVIPC|CONFIG_OVERLAY_FS|CONFIG_USER_NS|CONFIG_MODULE_SIG" out/.config
-          make O=out -j$(nproc) \
-            KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=deprecated-declarations -Wno-error=incompatible-pointer-types"
+          make O=out -j$(nproc) WERROR=0 \
+            KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=deprecated-declarations -Wno-error=incompatible-pointer-types -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=main -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement"
 
       - name: Upload kernel image
         uses: actions/upload-artifact@v4

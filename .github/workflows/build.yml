@@ -1,4 +1,4 @@
-name: Build PJS110 Kernel (Droidspaces + Magisk)
+name: Build PJS110 Kernel (Droidspaces + vendor)
 
 on:
   workflow_dispatch:
@@ -13,15 +13,22 @@ jobs:
           repository: oppo-source/android_kernel_oppo_mt6833
           ref: oppo/mt6833_t_13.1.1_a2x_5g
 
-      - name: Install cross toolchain (apt)
+      - name: Download OPPO vendor modules
+        run: |
+          curl -L -o /tmp/vendor.tar.gz https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/vendor.tar.gz
+          tar xzf /tmp/vendor.tar.gz
+          # vendor 解压后是 vendor/ 目录，symlink 指向 ../../../vendor/... 会自动生效
+          ls -la vendor/oplus/kernel/oplus_performance/sched_assist/ | head -5
+
+      - name: Install cross toolchain (gcc-11, more tolerant of legacy code)
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld gcc-aarch64-linux-gnu make libncurses-dev flex bison libssl-dev bc
+          sudo apt-get install -y gcc-aarch64-linux-gnu make libncurses-dev flex bison libssl-dev bc
 
-      - name: Apply Droidspaces config + fix OPPO/MTK module loading
+      - name: Apply Droidspaces config
         run: |
-          # 1) Droidspaces config
-          cat >> arch/arm64/configs/k6833v1_64_k419_defconfig << 'EOF'
+          DEF=arch/arm64/configs/k6833v1_64_k419_defconfig
+          cat >> $DEF << 'EOF'
 
           # DroidSpaces (non-GKI 4.19)
           CONFIG_SYSVIPC=y
@@ -83,101 +90,31 @@ jobs:
           CONFIG_NF_NAT_IPV6=y
           CONFIG_MACVLAN=y
           CONFIG_USER_NS=y
-          CONFIG_NETFILTER_XT_MATCH_COMMENT=y
-          CONFIG_NETFILTER_XT_MATCH_STATE=y
-          CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
-          CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y
-          CONFIG_NETFILTER_XT_MATCH_HL=y
-          CONFIG_NETFILTER_XT_TARGET_REJECT=y
-          CONFIG_IP_NF_TARGET_REJECT=y
-          CONFIG_NETFILTER_XT_TARGET_LOG=y
-          CONFIG_IP_NF_TARGET_ULOG=y
-          CONFIG_NETFILTER_XT_MATCH_RECENT=y
-          CONFIG_NETFILTER_XT_MATCH_LIMIT=y
-          CONFIG_NETFILTER_XT_MATCH_HASHLIMIT=y
-          CONFIG_NETFILTER_XT_MATCH_OWNER=y
-          CONFIG_NETFILTER_XT_MATCH_PKTTYPE=y
-          CONFIG_NETFILTER_XT_MATCH_MARK=y
-          CONFIG_NETFILTER_XT_TARGET_MARK=y
-          CONFIG_IP_SET=y
-          CONFIG_IP_SET_HASH_IP=y
-          CONFIG_IP_SET_HASH_NET=y
-          CONFIG_NETFILTER_XT_SET=y
-          CONFIG_NETFILTER_NETLINK_QUEUE=y
-          CONFIG_NETFILTER_NETLINK_LOG=y
-          CONFIG_NETFILTER_XT_TARGET_NFLOG=y
           EOF
 
-          # 2) 关闭 OPPO 闭源模块 feature
-          DEF=arch/arm64/configs/k6833v1_64_k419_defconfig
-          sed -i 's/CONFIG_OPLUS_FEATURE_LOWMEM_DBG=y/# CONFIG_OPLUS_FEATURE_LOWMEM_DBG is not set/' $DEF
-          sed -i 's/CONFIG_OPLUS_HEALTHINFO=y/# CONFIG_OPLUS_HEALTHINFO is not set/' $DEF
-          sed -i 's/CONFIG_OPLUS_FEATURE_SCHED_ASSIST=y/# CONFIG_OPLUS_FEATURE_SCHED_ASSIST is not set/' $DEF
-          sed -i 's/CONFIG_OPLUS_FEATURE_CPU_JANKINFO=y/# CONFIG_OPLUS_FEATURE_CPU_JANKINFO is not set/' $DEF
-          sed -i 's/CONFIG_OPLUS_FEATURE_MEMLEAK_DETECT=y/# CONFIG_OPLUS_FEATURE_MEMLEAK_DETECT is not set/' $DEF
-          sed -i 's/CONFIG_OPLUS_FEATURE_TASK_CPUSTATS=y/# CONFIG_OPLUS_FEATURE_TASK_CPUSTATS is not set/' $DEF
-          sed -i 's/CONFIG_KMALLOC_DEBUG=y/# CONFIG_KMALLOC_DEBUG is not set/' $DEF
-          sed -i 's/CONFIG_VMALLOC_DEBUG=y/# CONFIG_VMALLOC_DEBUG is not set/' $DEF
+          # 关闭模块签名强制校验（vendor .ko 用 OPPO 私钥签，我们签不了）
+          sed -i 's/CONFIG_MODULE_SIG=y/CONFIG_MODULE_SIG=n/' $DEF
+          sed -i 's/CONFIG_MODULE_SIG_FORCE=y/CONFIG_MODULE_SIG_FORCE=n/' $DEF
+          sed -i 's/CONFIG_MODULE_SIG_ALL=y/CONFIG_MODULE_SIG_ALL=n/' $DEF
 
-      - name: Auto-fix missing Kconfig refs (loop until config passes)
-        run: |
-          set +e
-          for i in $(seq 1 300); do
-            make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- k6833v1_64_k419_defconfig > /tmp/cfg_loop.log 2>&1
-            code=$?
-            if [ $code -eq 0 ]; then
-              echo "CONFIG_OK round=$i"
-              break
-            fi
-            missing=$(grep -oE "can't open file \"[^\"]+\"" /tmp/cfg_loop.log | head -1 | sed "s/can't open file \"//; s/\"$//")
-            if [ -z "$missing" ]; then
-              echo "NO_MISSING_FILE_FOUND"
-              tail -40 /tmp/cfg_loop.log
-              exit 1
-            fi
-            echo "round=$i missing=$missing"
-            grep -rlF "$missing" --include=Kconfig . 2>/dev/null | while read -r f; do
-              sed -i "\\|$missing|d" "$f"
-            done
-            rm -f out/.config
-          done
+          # 删掉 OPPO 开源漏掉的 cpu_jankinfo Kconfig 引用（这个文件 vendor 里也没有）
+          sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
 
-      - name: Remove dangling OPPO symlinks (point to vendor, not present)
-        run: |
-          git ls-files -s | grep "^120000" | awk '{print $4}' | while read -r link; do
-            target=$(readlink "$link" 2>/dev/null)
-            if [ -n "$target" ] && (echo "$target" | grep -q "vendor" || [ ! -e "$link" ]); then
-              echo "removing symlink: $link -> $target"
-              rm -f "$link"
-            fi
-          done
-          # 删掉无条件编译断链目录的 obj-y 引用（这些是 OPPO 闭源模块）
-          sed -i '/obj-y += healthinfo\//d' mm/Makefile
-          sed -i '/obj-y += sched_assist\//d' kernel/Makefile
-          # 关掉触发断链目录的 CONFIG
-          sed -i 's/CONFIG_OPLUS_SECURE_GUARD=y/# CONFIG_OPLUS_SECURE_GUARD is not set/' arch/arm64/configs/k6833v1_64_k419_defconfig
-          sed -i 's/CONFIG_OPLUS_FEATURE_UXIO_FIRST=y/# CONFIG_OPLUS_FEATURE_UXIO_FIRST is not set/' arch/arm64/configs/k6833v1_64_k419_defconfig
-          sed -i 's/CONFIG_DUMP_TASKS_MEM=y/# CONFIG_DUMP_TASKS_MEM is not set/' arch/arm64/configs/k6833v1_64_k419_defconfig
-          echo "Makefile refs cleaned"
-
-          # 3) 关闭模块签名强制校验（OPPO 私钥不可得，否则 vendor .ko 拒载）
-          sed -i '/CONFIG_MODULE_SIG=y/c\CONFIG_MODULE_SIG=n' arch/arm64/configs/k6833v1_64_k419_defconfig
-          sed -i '/CONFIG_MODULE_SIG_FORCE=y/c\CONFIG_MODULE_SIG_FORCE=n' arch/arm64/configs/k6833v1_64_k419_defconfig
-          sed -i '/CONFIG_MODULE_SIG_ALL=y/c\CONFIG_MODULE_SIG_ALL=n' arch/arm64/configs/k6833v1_64_k419_defconfig
-
-          # 4) 注释掉 MTK 强制 MODVERSIONS（否则 vendor .ko 的 CRC 对不上）
-          sed -i 's/^\tselect MODVERSIONS$/\t# select MODVERSIONS (disabled for vendor .ko compat)/' drivers/misc/mediatek/Kconfig.default
+          # 关掉 IKHEADERS（避免 proot/cross 环境 cpio 问题）
+          cat >> $DEF << 'EOF'
+          # CONFIG_IKHEADERS is not set
+          EOF
 
       - name: Build kernel
         run: |
-          make O=out ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          make O=out \
             k6833v1_64_k419_defconfig
-          # 确认关键配置已生效
-          grep -E "CONFIG_MODVERSIONS|CONFIG_MODULE_SIG|CONFIG_SYSVIPC|CONFIG_OVERLAY_FS|CONFIG_USER_NS" out/.config
-          make O=out ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            -j$(nproc)
+          grep -E "CONFIG_SYSVIPC|CONFIG_OVERLAY_FS|CONFIG_USER_NS|CONFIG_MODULE_SIG" out/.config
+          make O=out -j$(nproc) \
+            KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=deprecated-declarations -Wno-error=incompatible-pointer-types"
 
       - name: Upload kernel image
         uses: actions/upload-artifact@v4

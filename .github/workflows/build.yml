@@ -26,8 +26,7 @@ jobs:
           du -sh "$PARENT/vendor" || true
           [ -e kernel-4.19 ] || ln -s "$(basename "$GITHUB_WORKSPACE")" kernel-4.19
           cd "$GITHUB_WORKSPACE"
-          echo "=== symlink 自检 ==="
-          test -f kernel/sched_assist/Kconfig && echo "  OK kernel/sched_assist/Kconfig" || echo "  BREAK sched_assist"
+          test -f kernel/sched_assist/Kconfig && echo "  OK sched_assist" || echo "  BREAK sched_assist"
           test -f include/linux/sched_assist/sched_assist_binder.h && echo "  OK binder.h" || echo "  BREAK binder.h"
 
       - name: Stock config
@@ -49,9 +48,9 @@ jobs:
           fail=0
           ok()  { if [ "$1" = "0" ]; then echo "  [ok]   $2"; else echo "  [FAIL] $2"; fail=1; fi; }
 
-          echo "===== A. fs/proc/Kconfig 去掉 cpu_jankinfo ====="
+          echo "===== A. fs/proc/Kconfig ====="
           sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
-          ok $? "fs/proc/Kconfig"
+          ok $? "去掉 cpu_jankinfo 引用"
 
           echo "===== B. core 头文件 inline 声明 ====="
           sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h 2>/dev/null || true
@@ -59,96 +58,125 @@ jobs:
           sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h 2>/dev/null || true
           sed -i 's/^inline void blk_crypto_flock/extern void blk_crypto_flock/' include/linux/blk-crypto.h 2>/dev/null || true
 
-          echo "===== C1. sensor_devinfo.c 空参数定义 vs 原型 【本次真卡点】 ====="
-          # 原型: int register_lcdinfo_notifier(struct notifier_block *nb);
-          # 定义: __attribute__((weak)) int register_lcdinfo_notifier() {   <- K&R 空参数，冲突
+          echo "===== C0. 通用 inline 降级（全树 + vendor） ====="
+          cat > /tmp/inline_fix.py <<'__INLINE_FIX_EOF__'
+import re, os, sys
+
+# 通用 inline 降级器
+# 解决 gnu89/C99 inline 语义混用导致的：
+#   "inlining failed in call to 'always_inline' XXX: function body not available"
+#
+# 规则（保守，仅两类）：
+#   1) 头文件纯声明：  [extern] inline TYPE fn(args);  ->  extern TYPE fn(args);
+#   2) .c 文件定义：   inline TYPE fn(args) {         ->  TYPE fn(args) {
+# 不动：
+#   - static inline（头文件真 inline，安全）
+#   - 头文件里带函数体的 inline（改了会重复定义）
+#   - 含 __attribute__ 的行
+
+DECL = re.compile(r'^(\s*)(?:extern\s+)?inline\s+([A-Za-z_][\w \t\*]*?)\b(\w+)\s*\(([^;]*)\)\s*;\s*$')
+DEF = re.compile(r'^(\s*)inline\s+([A-Za-z_][\w \t\*]*?)\b(\w+)\s*\(([^)]*)\)\s*(\{)?\s*$')
+SKIP = {'main'}
+
+
+def process(path, is_header):
+    try:
+        lines = open(path, encoding='utf-8', errors='surrogateescape').readlines()
+    except Exception:
+        return 0
+    changed, out = 0, []
+    for ln in lines:
+        s = ln.lstrip()
+        if s.startswith('static ') or 'static inline' in ln:
+            out.append(ln)
+            continue
+        if re.match(r'^\s*#', ln) or '__attribute__' in ln:
+            out.append(ln)
+            continue
+        m = DECL.match(ln)
+        if m and is_header:
+            ind, typ, name, args = m.groups()
+            if name in SKIP:
+                out.append(ln)
+                continue
+            newline = ind + 'extern ' + typ.strip() + ' ' + name + '(' + args + ');' + '\n'
+            out.append(newline)
+            changed += 1
+            continue
+        m = DEF.match(ln)
+        if m and not is_header:
+            ind, typ, name, args, br = m.groups()
+            if name in SKIP:
+                out.append(ln)
+                continue
+            newline = ind + typ.strip() + ' ' + name + '(' + args + ')'
+            if br:
+                newline += ' {'
+            newline += '\n'
+            out.append(newline)
+            changed += 1
+            continue
+        out.append(ln)
+    if changed:
+        open(path, 'w', encoding='utf-8', errors='surrogateescape').writelines(out)
+    return changed
+
+
+def walk(roots):
+    tot, files = 0, 0
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for dp, dn, fns in os.walk(root):
+            dn[:] = [d for d in dn if d != '.git']
+            for fn in fns:
+                if fn.endswith('.h'):
+                    n = process(os.path.join(dp, fn), True)
+                elif fn.endswith('.c'):
+                    n = process(os.path.join(dp, fn), False)
+                else:
+                    continue
+                if n:
+                    tot += n
+                    files += 1
+                    print('  ' + str(n) + '  ' + os.path.join(dp, fn))
+    print('  合计 ' + str(tot) + ' 处 / ' + str(files) + ' 文件')
+    return tot
+
+
+if __name__ == '__main__':
+    walk(sys.argv[1:])
+__INLINE_FIX_EOF__
+          echo "--- 内核树 ---"
+          python3 /tmp/inline_fix.py . 2>&1 | tail -50 || true
+          echo "--- vendor ---"
+          python3 /tmp/inline_fix.py "$V" 2>&1 | tail -50 || true
+          echo "--- 残留 ^extern inline ---"
+          echo -n "tree: "; grep -rn '^extern inline' drivers include kernel mm block fs net sound crypto security 2>/dev/null | wc -l
+          echo -n "vendor: "; grep -rn '^extern inline' "$V" --include=*.h --include=*.c 2>/dev/null | wc -l
+
+          echo "===== C1. sensor_devinfo.c 空参数 ====="
           SDI="$V/oplus/sensor/kernel/oplus_sensor_devinfo/sensor_devinfo.c"
           if [ -f "$SDI" ]; then
             sed -i 's/^__attribute__((weak)) int register_lcdinfo_notifier() {/__attribute__((weak)) int register_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
             sed -i 's/^__attribute__((weak)) int unregister_lcdinfo_notifier() {/__attribute__((weak)) int unregister_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
-            ok $? "sensor_devinfo.c 两处空参数补原型"
-            echo "  --- 改后 ---"
+            ok $? "sensor_devinfo.c 补原型"
             grep -n 'lcdinfo_notifier' "$SDI" | head -6
           else
             echo "  [FAIL] 缺 $SDI"; fail=1
           fi
-          # sensorhub 版同款，一起修（不存在的分支不会编进来，但先修无妨）
           SDI2="$V/oplus/sensor/kernel/sensorhub/oplus_sensor_devinfo/sensor_devinfo.c"
-          if [ -f "$SDI2" ]; then
+          [ -f "$SDI2" ] && {
             sed -i 's/^__attribute__((weak)) int register_lcdinfo_notifier() {/__attribute__((weak)) int register_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI2"
             sed -i 's/^__attribute__((weak)) int unregister_lcdinfo_notifier() {/__attribute__((weak)) int unregister_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI2"
-            echo "  [ok]   sensorhub 版同步修"
-          fi
-
-          echo "===== C2. is_audio_task (gnu89 inline 不发射外部符号) ====="
-          BINDER="$V/oplus/kernel/oplus_performance/sched_assist/sched_assist_binder.h"
-          SAC="$V/oplus/kernel/oplus_performance/sched_assist/sched_assist_common.c"
-          if [ -f "$BINDER" ]; then
-            sed -i 's/^extern inline bool is_audio_task/extern bool is_audio_task/' "$BINDER"
-            ok $? "binder.h extern inline -> extern"
-          else
-            echo "  [FAIL] 缺 $BINDER"; fail=1
-          fi
-          if [ -f "$SAC" ]; then
-            sed -i 's/^inline bool is_audio_task(struct task_struct \*task)/bool is_audio_task(struct task_struct *task)/' "$SAC"
-            ok $? "common.c inline 定义 -> 普通"
-          fi
-
-          echo "===== C3. zram ====="
-          ZK="drivers/block/zram/zram_drv_internal.h"
-          ZKC="drivers/block/zram/zram_drv.c"
-          if [ -f "$ZK" ]; then
-            sed -i 's/^extern inline bool is_thp_zram/extern bool is_thp_zram/' "$ZK"
-            sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' "$ZK"
-            ok $? "内核树 zram_drv_internal.h 两处声明"
-            echo "  --- 改后 ---"; grep -n 'is_thp_zram\|zram_page_state' "$ZK" | head -4
-          else
-            echo "  [FAIL] 缺 $ZK"; fail=1
-          fi
-          if [ -f "$ZKC" ]; then
-            sed -i 's/^inline unsigned long zram_page_state(struct zram \*zram, int type)/unsigned long zram_page_state(struct zram *zram, int type)/' "$ZKC"
-            sed -i 's/^bool is_thp_zram(struct zram \*zram)/bool is_thp_zram(struct zram *zram)/' "$ZKC"
-            # is_thp_zram 在树里可能已经是非 inline，保险起见再压一次 inline 前缀
-            sed -i 's/^inline bool is_thp_zram(struct zram \*zram)/bool is_thp_zram(struct zram *zram)/' "$ZKC"
-            ok $? "内核树 zram_drv.c 定义去 inline"
-            echo "  --- 改后 ---"; grep -n '^unsigned long zram_page_state\|^bool is_thp_zram\|^inline unsigned long zram_page_state\|^inline bool is_thp_zram' "$ZKC" | head -4
-          else
-            echo "  [FAIL] 缺 $ZKC"; fail=1
-          fi
-          # vendor 侧同款（若有），一起压平，避免双份冲突
-          ZH="$V/oplus/kernel/mm/hybridswap_zram/zram_drv_internal.h"
-          ZC="$V/oplus/kernel/mm/hybridswap_zram/zram_drv.c"
-          [ -f "$ZH" ] && {
-            sed -i 's/^extern inline bool is_chp_zram/extern bool is_chp_zram/' "$ZH"
-            sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' "$ZH"
-            echo "  [ok]   vendor zram_drv_internal.h"
+            echo "  [ok]   sensorhub 版同步"
           }
-          [ -f "$ZC" ] && {
-            sed -i 's/^inline bool is_chp_zram(struct zram \*zram)/bool is_chp_zram(struct zram *zram)/' "$ZC"
-            sed -i 's/^inline unsigned long zram_page_state(struct zram \*zram, int type)/unsigned long zram_page_state(struct zram *zram, int type)/' "$ZC"
-            echo "  [ok]   vendor zram_drv.c"
-          }
-
-          echo "===== C4. is_dma_buf_file（内核树已有实体，删多余声明） ====="
-          MH="$V/oplus/kernel/mm/mm_osvelte/memstat.h"
-          [ -f "$MH" ] && { sed -i '/^extern inline int is_dma_buf_file/d' "$MH"; ok $? "memstat.h 删行"; }
-
-          echo "===== C5. vm_mmap_pgoff_with_check（实体 static inline） ====="
-          RH="$V/oplus/kernel/oplus_performance/gloom/resmap_account.h"
-          [ -f "$RH" ] && {
-            perl -0pi -e 's/^extern inline unsigned long vm_mmap_pgoff_with_check\([^;]*?\);/\/* entity is static inline in resmap_account.c *\/ /ms' "$RH"
-            ok $? "resmap_account.h 删声明"
-          }
-
-          echo "===== C6. ws_all_release（文件内无实体） ====="
-          WM="$V/oplus/kernel/wakelock_profiler/oplus_wakelock_profiler_mtk.c"
-          [ -f "$WM" ] && { sed -i '/^extern inline bool ws_all_release(void);$/d' "$WM"; ok $? "wakelock_profiler_mtk.c 删行"; }
 
           echo "===== D. 其他 ====="
           SY="$V/oplus/kernel/charger/v1/voocphy/oplus_sy6529.c"
           [ -f "$SY" ] && {
             sed -i 's/if (\*data == sy6529_CHARGE_MODE_2_1 | \*data == sy6529_CHARGE_MODE_1_1)/if ((*data == sy6529_CHARGE_MODE_2_1) | (*data == sy6529_CHARGE_MODE_1_1))/' "$SY"
-            ok $? "sy6529 括号优先级"
+            ok $? "sy6529 括号"
           }
           TP="$V/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"
           if [ -f "$TP" ] && ! grep -q TP_VXN "$TP"; then
@@ -171,7 +199,7 @@ jobs:
             '#define _SCP_FORWARD_H_' \
             '#include <../drivers/misc/mediatek/scp/include/scp.h>' \
             '#endif' > include/scp.h
-          ok $? "三个桩头文件"
+          ok $? "三个桩"
 
           echo "===== F. -Werror -> -Wno-error ====="
           grep -rl -- "-Werror" --include=Makefile --include=Kbuild --include="*.mk" . 2>/dev/null | while read -r f; do
@@ -185,9 +213,6 @@ jobs:
           sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out.config
           sed -i 's/^CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/' out.config
           sed -i 's/^CONFIG_MODULE_SIG_ALL=y/# CONFIG_MODULE_SIG_ALL is not set/' out.config
-
-          echo "===== H. 自检 ====="
-          grep -rn '^extern inline' "$V" --include=*.h --include=*.c 2>/dev/null | head -5 || echo "  extern inline 残留 0"
           grep -E "^CONFIG_(SYSVIPC|IPC_NS|USER_NS|CGROUP_PIDS|DEVTMPFS|POSIX_MQUEUE)=" out.config || true
 
           [ "$fail" -eq 0 ] && echo "ALL PATCHES OK" || { echo "!! 有必改项失败"; exit 1; }
@@ -197,7 +222,7 @@ jobs:
           export ARCH=arm64 SUBARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
           mkdir -p out
           cp out.config out/.config
-          KCF="-I$PWD/drivers/misc/mediatek/scp/include -I$PWD/drivers/misc/mediatek/include -fgnu89-inline -Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces -Wno-error=builtin-declaration-mismatch"
+          KCF="-I$PWD/drivers/misc/mediatek/scp/include -I$PWD/drivers/misc/mediatek/include -Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces -Wno-error=builtin-declaration-mismatch"
           set +e
           make O=out ARCH=arm64 -j$(nproc) Image.gz KCFLAGS="$KCF" > /tmp/build.log 2>&1
           RC=$?

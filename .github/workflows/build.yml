@@ -128,6 +128,13 @@ jobs:
           sed -i -E 's/^CONFIG_HYBRIDSWAP(=y|=m)/# CONFIG_HYBRIDSWAP is not set/' $DEF
           sed -i -E 's/^CONFIG_HYBRIDSWAP_[A-Z_]*(=y|=m)/# & is not set/' $DEF
           sed -i -E 's/^(OPLUS_FEATURE_HYBRIDSWAP)=(yes|y|true)/\1=no/' oplus_native_features.mk 2>/dev/null || true
+          # 直接从 zram Makefile 里摘掉 hybridswap 编译目标（彻底避免）
+          if [ -f drivers/block/zram/Makefile ]; then
+            sed -i 's|obj-$(CONFIG_HYBRIDSWAP).*hybridswap.*|# hybridswap removed for build|' drivers/block/zram/Makefile
+            sed -i '/hybridswap/d' drivers/block/zram/Makefile
+            echo "hybridswap refs removed from zram Makefile"
+            cat drivers/block/zram/Makefile | head -10
+          fi
 
           # 关掉 OPLUS 稳定性/性能模块（OPPO 开源时漏了对应源码文件，会导致编译失败）
           # 这些跟 Droidspaces 功能无关

@@ -1,4 +1,4 @@
-name: Build PJS110 Kernel (stock-config based)
+name: Build PJS110 Kernel
 
 on:
   workflow_dispatch:
@@ -21,64 +21,40 @@ jobs:
           tar xzf vendor.tar.gz
           rm -f vendor.tar.gz
           cd "$GITHUB_WORKSPACE"
-          ls kernel/sched_assist/Kconfig && echo "SYMLINK_OK" || echo "SYMLINK_BROKEN"
+          ls kernel/sched_assist/Kconfig && echo "SYMLINK_OK"
 
-      - name: Download stock kernel config from device image
+      - name: Download stock config
         run: |
           curl -L -o /tmp/stock.config https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/pjs110_stock.config
-          echo "=== stock config 行数 ==="
           wc -l /tmp/stock.config
-          echo "=== 关键项确认 ==="
-          grep -E "^CONFIG_(SYSVIPC|IPC_NS|USER_NS|CGROUP_PIDS|DEVTMPFS)=" /tmp/stock.config || echo "(这5项原厂没有，需要加)"
 
-      - name: Install clang toolchain (matching stock: clang 11)
+      - name: Install toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y make libncurses-dev flex bison libssl-dev bc gcc-aarch64-linux-gnu
-          # 用 AOSP 的 clang 11 预编译（与设备原厂一致）
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 /tmp/clangprebuilt 2>/dev/null || true
-          ls /tmp/clangprebuilt 2>/dev/null | head -20 || echo "需要备用方案"
 
-      - name: Prepare kernel config
+      - name: Prepare config
         run: |
-          # 用原厂 config 作为基础
           cp /tmp/stock.config out.config
-          # 只加 Droidspaces 缺的 5 项
-          cat >> out.config << 'EOF'
-
-          # === Droidspaces required (not in stock config) ===
-          CONFIG_SYSVIPC=y
-          CONFIG_SYSVIPC_SYSCTL=y
-          CONFIG_IPC_NS=y
-          CONFIG_USER_NS=y
-          CONFIG_CGROUP_PIDS=y
-          CONFIG_DEVTMPFS=y
-          CONFIG_DEVTMPFS_MOUNT=y
-          CONFIG_POSIX_MQUEUE=y
-
-          # === 关闭模块签名强制（否则 vendor .ko 全部拒载）===
-          # CONFIG_MODULE_SIG is not set
-          # CONFIG_MODULE_SIG_FORCE is not set
-          # CONFIG_MODULE_SIG_ALL is not set
-          EOF
-
-          echo "=== 最终 config 关键项 ==="
-          grep -E "^CONFIG_(SYSVIPC|IPC_NS|USER_NS|CGROUP_PIDS|DEVTMPFS|MODVERSIONS)=|^# CONFIG_MODULE_SIG" out.config
+          printf '\nCONFIG_SYSVIPC=y\nCONFIG_SYSVIPC_SYSCTL=y\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_POSIX_MQUEUE=y\n' >> out.config
+          sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out.config
+          sed -i 's/^CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/' out.config
+          sed -i 's/^CONFIG_MODULE_SIG_ALL=y/# CONFIG_MODULE_SIG_ALL is not set/' out.config
+          echo "=== check ==="
+          grep -E "^CONFIG_(SYSVIPC|IPC_NS|USER_NS|CGROUP_PIDS|DEVTMPFS)=" out.config
+          grep -E "^# CONFIG_MODULE_SIG" out.config
 
       - name: Build kernel
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          # 用 stock config 直接编译（不跑 defconfig，避免被 OPPO feature set 覆盖）
           mkdir -p out
           cp out.config out/.config
           make O=out ARCH=arm64 olddefconfig
-          echo "=== 编译开始 ==="
-          make O=out -j$(nproc) \
-            KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=deprecated-declarations"
+          make O=out -j$(nproc) KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=deprecated-declarations"
 
-      - name: Upload kernel image
+      - name: Upload kernel
         uses: actions/upload-artifact@v4
         with:
           name: Image.gz

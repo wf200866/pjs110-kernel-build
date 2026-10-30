@@ -207,14 +207,29 @@ jobs:
           # OPPO 项目信息 + 反馈模块：原厂未开，导致 get_eng_version / oplus_kevent_fb_str 无定义
           printf 'CONFIG_OPLUS_FEATURE_OPROJECT=y\nCONFIG_OPLUS_FEATURE_FEEDBACK=y\n' >> out.config
           # 内核树 kernel/futex.c 调用 locking_vh_do_futex_handler，
-          # 但 vendor sync/futex.c 只提供 locking_vh_do_futex（无 _handler），名字对不上
-          # → 关掉 CONFIG_OPLUS_LOCKING_STRATEGY，走原生 futex（原厂 kernel 也是这个逻辑）
-          if grep -q '^CONFIG_OPLUS_LOCKING_STRATEGY=' out.config; then
-            sed -i 's/^CONFIG_OPLUS_LOCKING_STRATEGY=.*/# CONFIG_OPLUS_LOCKING_STRATEGY is not set/' out.config
+          # 但两套 vendor 代码（sched_assist/sync、synchronize）都不提供该符号
+          # （它们提供的是 locking_vh_do_futex / android_vh_do_futex_handler）
+          # → 直接把调用点用 #if 0 屏蔽，功能等价于未启用该优化
+          FUTEX_C="kernel/futex.c"
+          if [ -f "$FUTEX_C" ] && grep -q 'locking_vh_do_futex_handler' "$FUTEX_C"; then
+            # 在该调用的上一行插入 #if 0，调用之后补 #endif
+            perl -0pi -e 's/^(\s*)locking_vh_do_futex_handler\(([^;]*)\);/$1#if 0 \/* symbol not provided by vendor *\/\n$1locking_vh_do_futex_handler($2);\n$1#endif/ms' "$FUTEX_C"
+            ok $? "kernel/futex.c 屏蔽 locking_vh_do_futex_handler"
+            grep -n -B2 -A2 'symbol not provided by vendor' "$FUTEX_C" | head -10
           else
-            printf '# CONFIG_OPLUS_LOCKING_STRATEGY is not set\n' >> out.config
+            echo "  [note] futex.c 无该调用或文件缺失"
           fi
-          echo "  [ok]   LOCKING_STRATEGY 关闭（符号名不匹配）"
+
+          # 同理，kernel/locking/mutex.c 调用 mutex_list_add，需要 sched_assist_mutex
+          # 这个在 sched_assist 目录但只在 CONFIG_OPLUS_LOCKING_STRATEGY 下编
+          # → 打开 LOCKING_STRATEGY（futex 那处已屏蔽，不会有符号问题）
+          if grep -q '^# CONFIG_OPLUS_LOCKING_STRATEGY is not set' out.config; then
+            sed -i 's/^# CONFIG_OPLUS_LOCKING_STRATEGY is not set/CONFIG_OPLUS_LOCKING_STRATEGY=y/' out.config
+          elif ! grep -q '^CONFIG_OPLUS_LOCKING_STRATEGY=' out.config; then
+            printf 'CONFIG_OPLUS_LOCKING_STRATEGY=y\n' >> out.config
+          fi
+          echo "  [ok]   LOCKING_STRATEGY=y（提供 mutex_list_add）"
+          grep -E '^CONFIG_OPLUS_LOCKING_STRATEGY=' out.config || true
           sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out.config
           sed -i 's/^CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/' out.config
           sed -i 's/^CONFIG_MODULE_SIG_ALL=y/# CONFIG_MODULE_SIG_ALL is not set/' out.config

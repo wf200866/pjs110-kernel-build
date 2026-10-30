@@ -38,6 +38,13 @@ jobs:
           # 先删掉 OPPO 开源缺失的 Kconfig 引用（无论用哪种 config 都要删）
           sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
           echo "=== fixed missing Kconfig refs ==="
+          # 修复 OPPO 头文件的 inline 声明（函数体在 .c 里，gcc 报 always_inline 错）
+          sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h
+          sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h
+          sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h
+          sed -i 's/^inline bool blk_crypto_flock/extern bool blk_crypto_flock/' include/linux/blk-crypto.h
+          sed -i 's/^extern inline bool is_audio_task/extern bool is_audio_task/' include/linux/sched_assist/sched_assist_binder.h 2>/dev/null || true
+          echo "=== inline decls fixed ==="
           cp /tmp/stock.config out.config
           printf '\nCONFIG_SYSVIPC=y\nCONFIG_SYSVIPC_SYSCTL=y\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_POSIX_MQUEUE=y\n' >> out.config
           sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out.config

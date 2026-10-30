@@ -55,8 +55,10 @@ jobs:
             'static inline bool oppo_is_android_core_group(struct pid *pgrp) { return false; }' \
             '#endif' > include/soc/oplus/system/oppo_process.h
           echo "=== oppo_process.h stub created ==="
-          # zram_drv_internal.h 的 inline 修复
-          find . -name "zram_drv_internal.h" -exec sed -i 's/^static inline.*zram_page_state.*/static inline unsigned int zram_page_state(struct zram *zram) { return 0; }/' {} \; 2>/dev/null || true
+          # zram_drv_internal.h 的 extern inline 声明修复（函数体在 .c 里）
+          sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' drivers/block/zram/zram_drv_internal.h 2>/dev/null || true
+          sed -i 's/^extern inline bool is_thp_zram/extern bool is_thp_zram/' drivers/block/zram/zram_drv_internal.h 2>/dev/null || true
+          grep -n "zram_page_state\|is_thp_zram" drivers/block/zram/zram_drv_internal.h 2>/dev/null | head -2
           cp /tmp/stock.config out.config
           printf '\nCONFIG_SYSVIPC=y\nCONFIG_SYSVIPC_SYSCTL=y\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_POSIX_MQUEUE=y\n' >> out.config
           sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out.config

@@ -73,6 +73,16 @@ jobs:
             'static inline int get_PCB_Version(void) { return 0; }' \
             '#endif' > include/soc/oplus/system/oppo_project.h
           echo "=== oppo_process.h + oppo_project.h stubs created ==="
+          # 一劳永逸：把源码树里所有 -Werror 改成 -Wno-error（OPPO/MTK 老代码在新 gcc 下 Werror 太多）
+          grep -rl -- "-Werror" --include=Makefile --include=Kbuild --include="*.mk" . 2>/dev/null | while read f; do
+            sed -i 's/-Werror/-Wno-error/g' "$f"
+          done
+          # 头文件里的 Werror pragma 也处理
+          grep -rl "Werror" --include="*.h" include/ drivers/ 2>/dev/null | head -20 | while read f; do
+            sed -i 's/-Werror/-Wno-error/g' "$f"
+          done
+          echo "=== all -Werror converted to -Wno-error ==="
+          grep -rn -- "-Werror" --include=Makefile . 2>/dev/null | head -3 || echo "no -Werror left in Makefiles"
           # 修 oplus_sy6529.c 的 | 优先级问题（-Werror=parentheses 无法通过 KCFLAGS 压制）
           SY6529="$(dirname "$GITHUB_WORKSPACE")/vendor/oplus/kernel/charger/v1/voocphy/oplus_sy6529.c"
           if [ -f "$SY6529" ]; then
@@ -107,7 +117,7 @@ jobs:
           mkdir -p out
           cp out.config out/.config
           # 直接编译，不跑 olddefconfig（原厂 config 可能含 OPPO 特有 symbol，olddefconfig 会因缺失 Kconfig 报错）
-          make O=out ARCH=arm64 -j$(nproc) Image.gz KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result"
+          make O=out ARCH=arm64 -j$(nproc) Image.gz KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces"
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4

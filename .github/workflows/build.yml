@@ -104,13 +104,21 @@ jobs:
           sed -i 's/CONFIG_MODULE_SIG_FORCE=y/CONFIG_MODULE_SIG_FORCE=n/' $DEF
           sed -i 's/CONFIG_MODULE_SIG_ALL=y/CONFIG_MODULE_SIG_ALL=n/' $DEF
 
-          # 终极方案：清空 OPLUS feature set（这些闭源模块源码不全，且与 Droidspaces 无关）
+          # 终极方案：关掉 OPLUS_BUG_* 系列（这些是 OPPO 稳定性监控，源码不全且与 Droidspaces 无关）
           if [ -f oplus_native_features.mk ]; then
             cp oplus_native_features.mk oplus_native_features.mk.bak
-            sed -i 's/^OPLUS_NATIVE_FEATURE_SET=.*/OPLUS_NATIVE_FEATURE_SET=/' oplus_native_features.mk
-            sed -i 's/^OPLUS_NATIVE_MACRO_FEATURES=.*/OPLUS_NATIVE_MACRO_FEATURES=/' oplus_native_features.mk
-            echo "cleared OPLUS feature sets"
-            grep -E "^OPLUS_NATIVE" oplus_native_features.mk | head -3
+            # 关闭所有 OPLUS_BUG_* 开关（Bug 稳定性监控，会引入缺失的闭源头文件）
+            sed -i -E 's/^(OPLUS_BUG_[A-Z_]+)=(yes|y|true)/\1=no/' oplus_native_features.mk
+            # 关闭已知会导致源码缺失的模块
+            for k in OPLUS_FEATURE_SCHED_ASSIST OPLUS_FEATURE_CPU_JANKINFO OPLUS_FEATURE_TASK_CPUSTATS \
+                     OPLUS_FEATURE_MEMLEAK_DETECT OPLUS_FEATURE_LOWMEM_DBG OPLUS_FEATURE_HEALTHINFO \
+                     OPLUS_FEATURE_SECURE_GUARD OPLUS_FEATURE_SECURE_ROOTGUARD \
+                     OPLUS_FEATURE_SECURE_MOUNTGUARD OPLUS_FEATURE_SECURE_EXECGUARD \
+                     OPLUS_FEATURE_IOMONITOR; do
+              sed -i -E "s/^(${k})=(yes|y|true)/\1=no/" oplus_native_features.mk
+            done
+            echo "=== 已关闭的 OPLUS 开关 ==="
+            grep -E "^OPLUS_BUG_|^OPLUS_FEATURE_(SCHED_ASSIST|CPU_JANKINFO|MEMLEAK)" oplus_native_features.mk | head -8
           fi
 
           # 删掉 OPPO 开源漏掉的 cpu_jankinfo Kconfig 引用（这个文件 vendor 里也没有）

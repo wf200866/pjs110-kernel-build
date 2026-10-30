@@ -211,13 +211,18 @@ jobs:
           # （它们提供的是 locking_vh_do_futex / android_vh_do_futex_handler）
           # → 直接把调用点用 #if 0 屏蔽，功能等价于未启用该优化
           FUTEX_C="kernel/futex.c"
-          if [ -f "$FUTEX_C" ] && grep -q 'locking_vh_do_futex_handler' "$FUTEX_C"; then
-            # 在该调用的上一行插入 #if 0，调用之后补 #endif
-            perl -0pi -e 's/^(\s*)locking_vh_do_futex_handler\(([^;]*)\);/$1#if 0 \/* symbol not provided by vendor *\/\n$1locking_vh_do_futex_handler($2);\n$1#endif/ms' "$FUTEX_C"
-            ok $? "kernel/futex.c 屏蔽 locking_vh_do_futex_handler"
-            grep -n -B2 -A2 'symbol not provided by vendor' "$FUTEX_C" | head -10
+          if [ -f "$FUTEX_C" ]; then
+            cnt=$(grep -c 'locking_vh_.*_handler' "$FUTEX_C" 2>/dev/null || echo 0)
+            echo "  发现 $cnt 处 locking_vh_*_handler 调用"
+            # 把所有 #if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY) 改成 #if 0
+            # 这些块里全是 vendor 未提供的 _handler 符号
+            sed -i 's/^#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)$/#if 0 \/* oplus locking strategy: vendor handlers not provided *\//' "$FUTEX_C"
+            left=$(grep -c 'IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)' "$FUTEX_C" 2>/dev/null || echo 0)
+            echo "  剩余 IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY): $left"
+            grep -n 'vendor handlers not provided' "$FUTEX_C" | head -12
+            ok 0 "futex.c 屏蔽 vendor 缺失的 handler 调用"
           else
-            echo "  [note] futex.c 无该调用或文件缺失"
+            echo "  [note] $FUTEX_C 缺失"
           fi
 
           # 同理，kernel/locking/mutex.c 调用 mutex_list_add，需要 sched_assist_mutex

@@ -104,20 +104,24 @@ jobs:
             '#include <linux/types.h>' 'struct pid;' \
             'static inline bool oppo_is_android_core_group(struct pid *pgrp) { return false; }' \
             '#endif' > include/soc/oplus/system/oppo_process.h
-          # 注意：oppo_project.h 不能造桩！vendor 里有真头文件 + 真 .c 实体
-          # 内核树 include/soc/oplus/system/ 目录存在，但唯独缺 oplus_project.h 的链接
-          if [ -f include/soc/oplus/system/oppo_project.h ]; then
-            rm -f include/soc/oplus/system/oppo_project.h
-            echo "  [ok]   移除旧桩 oppo_project.h"
+          # 注意：不能造桩！vendor 里有真头文件 + 真 .c 实体
+          # 两个名字都要有：调用方 include 的是 oppo_project.h，vendor 真名是 oplus_project.h
+          rm -f include/soc/oplus/system/oppo_project.h
+          SRC_PJ="$V/oplus/kernel/boot/include/oplus_project.h"
+          if [ -f "$SRC_PJ" ]; then
+            ln -sf "$SRC_PJ" include/soc/oplus/system/oplus_project.h
+            ln -sf "$SRC_PJ" include/soc/oplus/system/oppo_project.h
+            echo "  [ok]   两个名字都链到 vendor 真头文件"
+          else
+            echo "  [FAIL] 找不到 $SRC_PJ"; fail=1
           fi
-          if [ ! -e include/soc/oplus/system/oplus_project.h ]; then
-            ln -sf "$V/oplus/kernel/boot/include/oplus_project.h" \
-                   include/soc/oplus/system/oplus_project.h
-            echo "  [ok]   symlink oplus_project.h -> vendor 真头文件"
-          fi
-          test -f include/soc/oplus/system/oplus_project.h \
-            && echo "  [ok]   头文件可读" || { echo "  [FAIL] oplus_project.h 不可读"; fail=1; }
-          grep -c 'get_eng_version' include/soc/oplus/system/oplus_project.h 2>/dev/null || true
+          for h in oplus_project.h oppo_project.h; do
+            if [ -f "include/soc/oplus/system/$h" ]; then
+              echo "  [ok]   $h 可读 ($(grep -c get_eng_version "include/soc/oplus/system/$h") 处 get_eng_version)"
+            else
+              echo "  [FAIL] $h 不可读"; fail=1
+            fi
+          done
           [ -f include/scp.h ] || printf '%s\n' '#ifndef _SCP_FORWARD_H_' \
             '#define _SCP_FORWARD_H_' \
             '#include <../drivers/misc/mediatek/scp/include/scp.h>' \

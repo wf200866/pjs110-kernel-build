@@ -116,24 +116,39 @@ jobs:
           fi
           echo "  --- 修后 ---"; cat "$SOCMK"; echo "[EOF]"
 
-          # ★ 真正的根因：system/Kconfig 没 source oplus_project/Kconfig
-          # 导致 CONFIG_OPLUS_FEATURE_OPROJECT 是未声明 symbol，写进 .config 会被丢弃
+          # ★ 根因：system/Kconfig 没 source 子模块的 Kconfig
+          # 导致 CONFIG_OPLUS_FEATURE_OPROJECT / CONFIG_OPLUS_FEATURE_FEEDBACK
+          # 都是未声明 symbol，写进 .config 会被丢弃 → 对应 .o 不编译 → undefined reference
           SYSKC="drivers/soc/oplus/system/Kconfig"
-          echo "  --- $SYSKC 修前是否 source oplus_project ---"
-          grep -c 'oplus_project/Kconfig' "$SYSKC" 2>/dev/null || echo 0
-          if [ -f "$SYSKC" ] && ! grep -q 'oplus_project/Kconfig' "$SYSKC"; then
-            printf '\nsource "drivers/soc/oplus/system/oplus_project/Kconfig"\n' >> "$SYSKC"
-            ok $? "$SYSKC 追加 source oplus_project/Kconfig"
+          echo "  --- $SYSKC 修前 ---"; tail -3 "$SYSKC" 2>/dev/null; echo "[EOF]"
+          if [ -f "$SYSKC" ]; then
+            # 遍历 system/ 下所有子目录 Kconfig，缺谁补谁
+            ADDED=0
+            for sub in $(ls -d drivers/soc/oplus/system/*/ 2>/dev/null); do
+              name=$(basename "$sub")
+              [ -f "$sub/Kconfig" ] || continue
+              rel="drivers/soc/oplus/system/$name/Kconfig"
+              if ! grep -q "$rel" "$SYSKC"; then
+                printf 'source "%s"\n' "$rel" >> "$SYSKC"
+                echo "  [ok]   补 source $rel"
+                ADDED=$((ADDED+1))
+              fi
+            done
+            echo "  共补 $ADDED 条 source"
+            ok 0 "system/Kconfig 补齐子模块"
+          else
+            echo "  [FAIL] 缺 $SYSKC"; fail=1
           fi
-          echo "  --- 修后尾部 ---"; tail -5 "$SYSKC"; echo "[EOF]"
-          grep -q 'oplus_project/Kconfig' "$SYSKC" \
-            && echo "  [ok]   Kconfig 已 source" \
-            || { echo "  [FAIL] Kconfig 未 source"; fail=1; }
-          # 确认 oplus_project/Kconfig 里定义了该 symbol
-          test -f drivers/soc/oplus/system/oplus_project/Kconfig \
-            && grep -q 'OPLUS_FEATURE_OPROJECT' drivers/soc/oplus/system/oplus_project/Kconfig \
-            && echo "  [ok]   oplus_project/Kconfig 定义了 OPLUS_FEATURE_OPROJECT" \
-            || { echo "  [FAIL] oplus_project/Kconfig 异常"; fail=1; }
+          echo "  --- 修后（全部 source 行）---"
+          grep -n 'source' "$SYSKC" | head -40
+          # 关键 symbol 校验
+          for sym in OPLUS_FEATURE_OPROJECT OPLUS_FEATURE_FEEDBACK; do
+            if grep -rq "config $sym" drivers/soc/oplus/system/ 2>/dev/null; then
+              echo "  [ok]   $sym 已定义"
+            else
+              echo "  [FAIL] $sym 未定义"; fail=1
+            fi
+          done
           test -d drivers/soc/oplus/system/oplus_project \
             && echo "  [ok]   system/oplus_project 可访问" \
             || { echo "  [FAIL] system/oplus_project 不存在"; fail=1; }
@@ -167,8 +182,8 @@ jobs:
           cp /tmp/stock.config out.config
           # Droidspaces 必需
           printf '\nCONFIG_SYSVIPC=y\nCONFIG_SYSVIPC_SYSCTL=y\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_POSIX_MQUEUE=y\n' >> out.config
-          # OPPO 项目信息模块：原厂 config 没开，导致 get_eng_version/get_PCB_Version 无定义
-          printf 'CONFIG_OPLUS_FEATURE_OPROJECT=y\n' >> out.config
+          # OPPO 项目信息 + 反馈模块：原厂 config 没开，导致 undefined reference
+          printf 'CONFIG_OPLUS_FEATURE_OPROJECT=y\nCONFIG_OPLUS_FEATURE_FEEDBACK=y\n' >> out.config
           sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out.config
           sed -i 's/^CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/' out.config
           sed -i 's/^CONFIG_MODULE_SIG_ALL=y/# CONFIG_MODULE_SIG_ALL is not set/' out.config

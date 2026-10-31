@@ -493,6 +493,21 @@ jobs:
           grep -rl 'glRegisterWlan' . ../vendor --include=*.c 2>/dev/null | head -5
 
           echo ""
+          echo "=== 探针C：内核树里指向 vendor 的 symlink（这是接入点）==="
+          find . -maxdepth 5 -type l 2>/dev/null | while read -r l; do
+            t=$(readlink "$l" 2>/dev/null)
+            case "$t" in
+              *vendor*) echo "  $l -> $t" ;;
+            esac
+          done | head -40
+          echo "--- touchpanel 相关的 symlink ---"
+          find . -maxdepth 6 -type l 2>/dev/null | grep -i touch | while read -r l; do
+            echo "  $l -> $(readlink "$l" 2>/dev/null)"
+          done | head -20
+          echo "--- drivers/input/touchscreen 下的实体/symlink ---"
+          ls -la drivers/input/touchscreen/ 2>/dev/null | grep -iE 'oplus|touch' | head -10
+
+          echo ""
           echo "=== 探针B：原厂 ko 里哪些符号 CRC 变了（关键结论）==="
           echo "（这决定能否靠重编 ko 修复）"
 

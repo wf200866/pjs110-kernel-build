@@ -239,6 +239,39 @@ jobs:
             echo "  [ok]   Makefile 追加 clang 警告降级"
           fi
 
+          echo "===== I. Droidspaces 官方 non-GKI 补丁 ====="
+          # 官方文档 Step3：Documentation/resources/kernel-patches/non-GKI 下的全部补丁
+          #   01 xt_qtaguid panic：容器读 /proc/net/xt_qtaguid 时碰到 down 的网卡
+          #      dev_get_stats 解空指针 → kernel panic
+          #   02 cgroup 前缀：Android 去掉了 subsys. 前缀，LXC 按标准路径找不到
+          PDIR=/tmp/dsp_patches
+          mkdir -p "$PDIR"
+          BASE="https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI"
+          curl -sL -o "$PDIR/01.patch" "$BASE/01.fix_kernel_panic_in_xt_qtaguid.patch" || true
+          curl -sL -o "$PDIR/02.patch" "$BASE/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch" || true
+          for pf in "$PDIR"/01.patch "$PDIR"/02.patch; do
+            if [ -s "$pf" ] && head -1 "$pf" | grep -q '^From '; then
+              echo "  --- 应用 $(basename $pf) ---"
+              if patch -p1 --forward --no-backup-if-mismatch < "$pf" > /tmp/patch.log 2>&1; then
+                echo "  [ok]   打上了"
+              else
+                # 可能已经打过，或者上下文略有差异
+                if grep -q 'Reversed (or previously applied)' /tmp/patch.log; then
+                  echo "  [ok]   之前已打过"
+                else
+                  echo "  [WARN] 没打上，日志:"
+                  head -12 /tmp/patch.log
+                fi
+              fi
+            else
+              echo "  [WARN] $pf 下载失败或不是合法 patch"
+            fi
+          done
+          echo "  验证 01 是否生效:"
+          grep -n 'stats = &no_dev_stats' net/netfilter/xt_qtaguid.c | head -3 || echo "    没找到"
+          echo "  验证 02 是否生效:"
+          grep -n 'CFTYPE_NO_PREFIX' kernel/cgroup/cgroup.c | head -3 || echo "    没找到"
+
           [ "$fail" -eq 0 ] && echo "ALL PATCHES OK" || { echo "!! 有必改项失败"; exit 1; }
 
       - name: Prepare config (olddefconfig + ALLCONFIG，一次产出一致 config)
@@ -284,15 +317,71 @@ jobs:
           echo "=== 改 ALLCONFIG（不是改 .config）==="
           # vermagic 的 + 由脏树自动追加；写 "+" 会变 "4.19.191++"，实测会变砖
           setkv CONFIG_LOCALVERSION '""'
-          # Droidspaces 必需
+          # ===== Droidspaces 官方 Step1：必需项（照文档逐条搬） =====
+          # IPC
+          setkv CONFIG_SYSCTL y
           setkv CONFIG_SYSVIPC y
-          setkv CONFIG_SYSVIPC_SYSCTL y
+          setkv CONFIG_POSIX_MQUEUE y
+          # 核心 namespace
+          setkv CONFIG_NAMESPACES y
+          setkv CONFIG_PID_NS y
+          setkv CONFIG_UTS_NS y
           setkv CONFIG_IPC_NS y
-          setkv CONFIG_USER_NS y
+          setkv CONFIG_NET_NS y
+          # seccomp
+          setkv CONFIG_SECCOMP y
+          setkv CONFIG_SECCOMP_FILTER y
+          # cgroup
+          setkv CONFIG_CGROUPS y
+          setkv CONFIG_CGROUP_DEVICE y
+          setkv CONFIG_CGROUP_SCHED y
+          setkv CONFIG_FAIR_GROUP_SCHED y
+          setkv CONFIG_CGROUP_FREEZER y
+          setkv CONFIG_CGROUP_NET_PRIO y
+          setkv CONFIG_MEMCG y
+          setkv CONFIG_MEMCG_SWAP y
+          setkv CONFIG_CFS_BANDWIDTH y
           setkv CONFIG_CGROUP_PIDS y
+          setkv CONFIG_CGROUP_CPUACCT y
+          # devtmpfs / overlay / tmpfs
           setkv CONFIG_DEVTMPFS y
           setkv CONFIG_DEVTMPFS_MOUNT y
-          setkv CONFIG_POSIX_MQUEUE y
+          setkv CONFIG_OVERLAY_FS y
+          setkv CONFIG_TMPFS_POSIX_ACL y
+          setkv CONFIG_TMPFS_XATTR y
+          # firmware loader
+          setkv CONFIG_FW_LOADER y
+          setkv CONFIG_FW_LOADER_USER_HELPER y
+          setkv CONFIG_FW_LOADER_COMPRESS y
+          # 网络隔离 NAT 模式
+          setkv CONFIG_VETH y
+          setkv CONFIG_BRIDGE y
+          setkv CONFIG_NETFILTER y
+          setkv CONFIG_BRIDGE_NETFILTER y
+          setkv CONFIG_NETFILTER_ADVANCED y
+          setkv CONFIG_NF_CONNTRACK y
+          setkv CONFIG_IP_NF_IPTABLES y
+          setkv CONFIG_IP_NF_FILTER y
+          setkv CONFIG_NF_NAT y
+          setkv CONFIG_NF_TABLES y
+          setkv CONFIG_IP_NF_TARGET_MASQUERADE y
+          setkv CONFIG_NETFILTER_XT_TARGET_MASQUERADE y
+          setkv CONFIG_NETFILTER_XT_TARGET_TCPMSS y
+          setkv CONFIG_NETFILTER_XT_MATCH_ADDRTYPE y
+          setkv CONFIG_NF_CONNTRACK_NETLINK y
+          setkv CONFIG_NF_NAT_REDIRECT y
+          setkv CONFIG_IP_ADVANCED_ROUTER y
+          setkv CONFIG_IP_MULTIPLE_TABLES y
+          setkv CONFIG_MACVLAN y
+          # ★ 旧内核必须关掉，否则容器没网
+          # 这个 symbol 在原厂 config 里可能根本不存在，unsetkv 处理不了，所以直接写一行
+          unsetkv CONFIG_ANDROID_PARANOID_NETWORK
+          if ! grep -q '^CONFIG_ANDROID_PARANOID_NETWORK=' /tmp/allconfig && \
+             ! grep -q '^# CONFIG_ANDROID_PARANOID_NETWORK is not set' /tmp/allconfig; then
+            printf '# CONFIG_ANDROID_PARANOID_NETWORK is not set\n' >> /tmp/allconfig
+          fi
+          # docker unsafe procfs 修复
+          setkv CONFIG_USER_NS y
           # OPPO 模块
           setkv CONFIG_OPLUS_FEATURE_OPROJECT y
           setkv CONFIG_OPLUS_FEATURE_FEEDBACK y
@@ -313,18 +402,32 @@ jobs:
             && echo "  [OK] 链接通的，Kconfig 可读" \
             || echo "  [FAIL] 链接断了"
 
-          echo "=== 一次性产出 .config ==="
-          cp /tmp/allconfig out/.config
-          # ★ 关键：编译器必须【在 make 命令行上传】，不能只靠 export。
-          # 顶层 Makefile 有 `CC = $(CROSS_COMPILE)gcc` 这类赋值，
-          # 它会覆盖环境变量，导致 kconfig 探测出 CC_IS_GCC=y，
-          # 于是 CFI_CLANG / LTO_CLANG 的 depends 全不满足，整条链被删。
-          # 命令行变量优先级最高，能压过 Makefile 赋值。
+          echo "=== 一次性产出 .config（alldefconfig + ALLCONFIG）==="
+          # ★★★ 为什么必须是 alldefconfig 而不是 olddefconfig：
+          #   scripts/kconfig/conf.c:605-611
+          #     case allyesconfig:
+          #     case allmodconfig:
+          #     case alldefconfig:
+          #     case randconfig:
+          #         name = getenv("KCONFIG_ALLCONFIG");
+          #   KCONFIG_ALLCONFIG 只对上面这 4 个目标生效。
+          #   olddefconfig 不在列表里 —— 传了也不读，等于白加。
+          #   这就是前几轮"SYSVIPC/DEVTMPFS/触摸驱动写进去却不生效"的根因。
+          #
+          # alldefconfig 语义：所有 symbol 取默认值，但 ALLCONFIG 文件里
+          # 明确指定的，一律以文件为准。我们的 ALLCONFIG 就是完整原厂 config，
+          # 所以结果 = 原厂 config + 我们的修改。
+          #
+          # ★ 编译器必须在 make 命令行上传，不能只靠 export：
+          #   顶层 Makefile 有 `CC = $(CROSS_COMPILE)gcc` 这类赋值会覆盖环境变量，
+          #   导致 kconfig 探测出 CC_IS_GCC=y，CFI/LTO 整条依赖链全塌。
+          #   命令行变量优先级最高。
+          rm -f out/.config
           yes '' 2>/dev/null | make O=out ARCH=arm64 \
             CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
             OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
-            KCONFIG_ALLCONFIG=/tmp/allconfig olddefconfig > /tmp/cfg.log 2>&1
+            KCONFIG_ALLCONFIG=/tmp/allconfig alldefconfig > /tmp/cfg.log 2>&1
           RC=$?
           echo "  --- cfg.log 里 touchpanel 相关 ---"
           grep -i 'touchpanel' /tmp/cfg.log | head -10 || echo "  (无)"

@@ -274,6 +274,19 @@ jobs:
           grep -E '^CONFIG_(TOUCHPANEL_SYNAPTICS_TD4160|OPLUS_FEATURE_DNS_HOOK|OPLUS_BLK_MONITOR|OPLUS_CHIP_SOC_NODE|MODULE_SIG_FORCE)=' out.config || true
           echo "  --- 当前 y 项总数 ---"
           grep -cE '^CONFIG_[A-Za-z0-9_]+=y$' out.config || true
+
+          # ★★★ 核心修复 2：把没被 source 的 Kconfig 全部补进上级 =y 的 Kconfig ★★★
+          #
+          # 背景：out.config 里写 CONFIG_XXX=y 不算数
+          #   kbuild 只保留「在某个被 source 的 Kconfig 里有 config XXX 声明」的项
+          #   否则 autoconf 静默丢弃 → 产物的 kernel.config 里就没有 → .o 不编译
+          #   更关键：结构体定义缺失 → genksyms CRC 变化 → vendor ko 全部拒载
+          #
+          # 做法：扫描全树 Kconfig，找出「有 config 声明但没被任何人 source」的，
+          #   补进它所在目录的父级 Makefile 对应的 Kconfig
+          echo "  --- 补全未 source 的 Kconfig ---"
+          echo 'CmltcG9ydCBvcywgcmUsIHN5cwoKUk9PVCA9IG9zLmdldGN3ZCgpClZFTkRPUiA9IG9zLnBhdGguYWJzcGF0aChvcy5wYXRoLmpvaW4oUk9PVCwgJy4uJywgJ3ZlbmRvcicpKQoKIyAxLiDmlLbpm4bmiYDmnIkgS2NvbmZpZyDmlofku7YKa2NfZmlsZXMgPSBbXQpmb3IgYmFzZSBpbiAoUk9PVCwgVkVORE9SKToKICAgIGlmIG5vdCBvcy5wYXRoLmlzZGlyKGJhc2UpOgogICAgICAgIGNvbnRpbnVlCiAgICBmb3IgZHAsIGRuLCBmbnMgaW4gb3Mud2FsayhiYXNlKToKICAgICAgICBkbls6XSA9IFtkIGZvciBkIGluIGRuIGlmIGQgbm90IGluICgnLmdpdCcsICdvdXQnLCAndG9vbHMnKV0KICAgICAgICBmb3IgZm4gaW4gZm5zOgogICAgICAgICAgICBpZiBmbiA9PSAnS2NvbmZpZycgb3IgZm4uZW5kc3dpdGgoJ0tjb25maWcnKToKICAgICAgICAgICAgICAgIGtjX2ZpbGVzLmFwcGVuZChvcy5wYXRoLmpvaW4oZHAsIGZuKSkKCnByaW50KCcgIOaJq+aPj+WIsCAlZCDkuKogS2NvbmZpZycgJSBsZW4oa2NfZmlsZXMpKQoKIyAyLiDmlLbpm4bmiYDmnIkgc291cmNlIOW8leeUqApzb3VyY2VkID0gc2V0KCkKU1JDID0gcmUuY29tcGlsZShyJ15ccypzb3VyY2VccysiKFteIl0rKSInLCByZS5NKQpmb3IgZiBpbiBrY19maWxlczoKICAgIHRyeToKICAgICAgICB0eHQgPSBvcGVuKGYsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKQogICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICBjb250aW51ZQogICAgZm9yIG0gaW4gU1JDLmZpbmRpdGVyKHR4dCk6CiAgICAgICAgcCA9IG0uZ3JvdXAoMSkKICAgICAgICBmb3IgY2FuZCBpbiAocCwgb3MucGF0aC5qb2luKG9zLnBhdGguZGlybmFtZShmKSwgcCkpOgogICAgICAgICAgICBhcCA9IG9zLnBhdGgubm9ybXBhdGgob3MucGF0aC5qb2luKFJPT1QsIGNhbmQpKQogICAgICAgICAgICBzb3VyY2VkLmFkZChhcCkKICAgICAgICAgICAgc291cmNlZC5hZGQob3MucGF0aC5ub3JtcGF0aChvcy5wYXRoLmpvaW4ob3MucGF0aC5kaXJuYW1lKGYpLCBwKSkpCgojIDMuIOaJvuayoeiiqyBzb3VyY2Ug55qECm9ycGhhbnMgPSBbZiBmb3IgZiBpbiBrY19maWxlcyBpZiBvcy5wYXRoLm5vcm1wYXRoKGYpIG5vdCBpbiBzb3VyY2VkXQpwcmludCgnICDmnKrooqsgc291cmNlIOeahDogJWQg5LiqJyAlIGxlbihvcnBoYW5zKSkKCiMgNC4g5a+55q+P5LiqIG9ycGhhbu+8jOaJvuWug+eahOS4iue6pyBLY29uZmln77yI5ZCM55uu5b2V5oiW54i255uu5b2V77yJ77yM6L+95YqgIHNvdXJjZQphZGRlZCA9IDAKZm9yIGYgaW4gb3JwaGFuczoKICAgIGQgPSBvcy5wYXRoLmRpcm5hbWUoZikKICAgIHBhcmVudCA9IGQKICAgIHRhcmdldCA9IE5vbmUKICAgIGZvciBfIGluIHJhbmdlKDQpOgogICAgICAgIHBhcl9rYyA9IG9zLnBhdGguam9pbihwYXJlbnQsICdLY29uZmlnJykKICAgICAgICBpZiBvcy5wYXRoLmlzZmlsZShwYXJfa2MpIGFuZCBvcy5wYXRoLm5vcm1wYXRoKHBhcl9rYykgIT0gb3MucGF0aC5ub3JtcGF0aChmKToKICAgICAgICAgICAgdGFyZ2V0ID0gcGFyX2tjCiAgICAgICAgICAgIGJyZWFrCiAgICAgICAgcGFyZW50ID0gb3MucGF0aC5kaXJuYW1lKHBhcmVudCkKICAgICAgICBpZiBvcy5wYXRoLm5vcm1wYXRoKHBhcmVudCkgPT0gb3MucGF0aC5ub3JtcGF0aChST09UKSBvciBsZW4ocGFyZW50KSA8IGxlbihST09UKToKICAgICAgICAgICAgdGFyZ2V0ID0gb3MucGF0aC5qb2luKFJPT1QsICdLY29uZmlnJykKICAgICAgICAgICAgYnJlYWsKICAgIGlmIG5vdCB0YXJnZXQgb3Igbm90IG9zLnBhdGguaXNmaWxlKHRhcmdldCk6CiAgICAgICAgY29udGludWUKICAgIHRyeToKICAgICAgICB0eHQgPSBvcGVuKHRhcmdldCwgZXJyb3JzPSdyZXBsYWNlJykucmVhZCgpCiAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgIGNvbnRpbnVlCiAgICByZWwgPSBvcy5wYXRoLnJlbHBhdGgoZiwgUk9PVCkucmVwbGFjZSgnXFwnLCAnLycpCiAgICBpZiByZWwgaW4gdHh0OgogICAgICAgIGNvbnRpbnVlCiAgICB3aXRoIG9wZW4odGFyZ2V0LCAnYScsIGVycm9ycz0ncmVwbGFjZScpIGFzIGZoOgogICAgICAgIGZoLndyaXRlKCdcbnNvdXJjZSAiJXMiXG4nICUgcmVsKQogICAgYWRkZWQgKz0gMQoKcHJpbnQoJyAg5bey6KGlIHNvdXJjZTogJWQg5p2hJyAlIGFkZGVkKQo=' | base64 -d > /tmp/fix_kconfig.py
+          python3 /tmp/fix_kconfig.py 2>&1 | tail -30 || true
           # ★ 树是否脏（决定 vermagic 的 +）
           if git -C . rev-parse --git-dir >/dev/null 2>&1; then
             DIRTY=$(git -C . status --porcelain 2>/dev/null | head -1)

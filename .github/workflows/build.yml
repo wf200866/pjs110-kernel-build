@@ -241,7 +241,7 @@ jobs:
 
           [ "$fail" -eq 0 ] && echo "ALL PATCHES OK" || { echo "!! 有必改项失败"; exit 1; }
 
-      - name: Prepare config (对齐原厂 clang/LTO/CFI)
+      - name: Prepare config (olddefconfig + ALLCONFIG，一次产出一致 config)
         run: |
           set -eu
           export PATH="$HOME/clang/bin:$PATH"
@@ -252,125 +252,101 @@ jobs:
           export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
 
           mkdir -p out
-          cp /tmp/stock.config out/.config
 
-          # ★★★ 关键：先跑一次 olddefconfig，让 kconfig 把 (NEW) symbol 全部
-          # 按默认值算完。这一步会重算，会丢掉一些原厂的 =y。
-          # 所以必须在它之后、make 之前，把关键项再写回去。
-          # 之前漏了这一步，导致 make 期间隐式 silentoldconfig 弹 (NEW) 提问
-          # 读 stdin 失败 → 整份 config 被按默认重算 → f2fs 压缩等 117 项丢失。
-          echo "=== olddefconfig + KCONFIG_ALLCONFIG（以原厂值为准，不用默认）==="
-          # 关键：KCONFIG_ALLCONFIG 指向原厂 config，kconfig 会优先采用里面的值，
-          # 而不是在遇到 (NEW) symbol 时询问/取默认值。
-          # 之前只跑 olddefconfig，结果它把 35 个 symbol 整行删了（按默认 n 处理）。
-          # 现在用 ALLCONFIG 强制以原厂为准，一步到位，不需要事后手工回写。
+          # 思路（推翻了前面几轮的手工回写）：
+          #   把要改的值直接改进 ALLCONFIG 文件，再让 kconfig 一次性产出 .config。
+          #   产出之后【绝不再手工 sed .config】。
+          #
+          # 为什么要推翻手工回写：
+          #   上一轮跑完 olddefconfig 后又 sed 了 35 行 .config，
+          #   导致 .config 与 Kconfig 树不一致。kbuild 生成
+          #   include/config/auto.conf.cmd 时会检测到不一致并重跑 syncconfig，
+          #   重跑要问 (NEW) 符号，CI 里 stdin 空 → 直接 Error 2 退出。
+          #   所以：要么一次产出正确，要么就别碰。
           cp /tmp/stock.config /tmp/allconfig
-          yes '' 2>/dev/null | make O=out KCONFIG_ALLCONFIG=/tmp/allconfig allnoconfig > /tmp/oldcfg.log 2>&1 || true
-          echo "  allnoconfig 完成，退出码 $?"
-          tail -3 /tmp/oldcfg.log || true
 
-          echo "=== 再跑一次 olddefconfig 收敛（此时 ALLCONFIG 已生效）==="
-          yes '' 2>/dev/null | make O=out KCONFIG_ALLCONFIG=/tmp/allconfig olddefconfig >> /tmp/oldcfg.log 2>&1 || true
-          tail -3 /tmp/oldcfg.log || true
-
-          echo "=== 落定后的状态（这是被重算过的，可能已经丢了东西）==="
-          grep -cE '^CONFIG_.*=|^# CONFIG_.*is not set' out/.config || true
-
-          echo ""
-          echo "=== ★ 强制回写：原厂有的项，被 olddefconfig 丢掉的一律补回 ==="
-          # 三种情况都要处理：
-          #   1. 变成 "# CONFIG_X is not set"  → 替换
-          #   2. 变成 "CONFIG_X=n"（罕见）      → 替换
-          #   3. 整行消失                       → 追加
-          FIXED_REPL=0
-          FIXED_ADD=0
-          while IFS= read -r line; do
-            case "$line" in
-              CONFIG_*=y|CONFIG_*=m|CONFIG_*=\"*\") ;;
-              *) continue ;;
-            esac
-            sym="${line%%=*}"
-            if grep -q "^${sym}=" out/.config 2>/dev/null; then
-              :  # 还在，不动
-            elif grep -q "^# ${sym} is not set" out/.config 2>/dev/null; then
-              sed -i "s|^# ${sym} is not set|${line}|" out/.config
-              FIXED_REPL=$((FIXED_REPL+1))
+          setkv() {
+            sym="$1"; val="$2"
+            if grep -q "^${sym}=" /tmp/allconfig; then
+              sed -i "s|^${sym}=.*|${sym}=${val}|" /tmp/allconfig
+            elif grep -q "^# ${sym} is not set" /tmp/allconfig; then
+              sed -i "s|^# ${sym} is not set|${sym}=${val}|" /tmp/allconfig
             else
-              printf '%s\n' "$line" >> out/.config
-              FIXED_ADD=$((FIXED_ADD+1))
+              printf '%s=%s\n' "$sym" "$val" >> /tmp/allconfig
             fi
-          done < /tmp/stock.config
-          echo "  替换 is-not-set: $FIXED_REPL 项"
-          echo "  整行补回:       $FIXED_ADD 项"
+          }
+          unsetkv() {
+            if grep -q "^$1=" /tmp/allconfig; then
+              sed -i "s|^$1=.*|# $1 is not set|" /tmp/allconfig
+            fi
+          }
+
+          echo "=== 改 ALLCONFIG（不是改 .config）==="
+          # vermagic 的 + 由脏树自动追加；写 "+" 会变 "4.19.191++"，实测会变砖
+          setkv CONFIG_LOCALVERSION '""'
+          # Droidspaces 必需
+          setkv CONFIG_SYSVIPC y
+          setkv CONFIG_SYSVIPC_SYSCTL y
+          setkv CONFIG_IPC_NS y
+          setkv CONFIG_USER_NS y
+          setkv CONFIG_CGROUP_PIDS y
+          setkv CONFIG_DEVTMPFS y
+          setkv CONFIG_DEVTMPFS_MOUNT y
+          setkv CONFIG_POSIX_MQUEUE y
+          # OPPO 模块
+          setkv CONFIG_OPLUS_FEATURE_OPROJECT y
+          setkv CONFIG_OPLUS_FEATURE_FEEDBACK y
+          # 无 OPPO 私钥
+          unsetkv CONFIG_MODULE_SIG
+          unsetkv CONFIG_MODULE_SIG_FORCE
+          unsetkv CONFIG_MODULE_SIG_ALL
+          echo "  ALLCONFIG $(wc -l < /tmp/allconfig) 行"
 
           echo ""
-          echo "=== 逐个确认关键项 ==="
-          for k in F2FS_FS_COMPRESSION F2FS_FS_LZO F2FS_FS_LZ4 F2FS_FS_ZSTD \
-                   F2FS_FS_ENCRYPTION RELR TOOLS_SUPPORT_RELR \
-                   CFI CFI_CLANG CFI_CLANG_SHADOW LTO_CLANG THINLTO \
-                   CC_IS_CLANG LD_IS_LLD CLANG_VERSION; do
-            cur=$(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo "  (无)")
-            echo "  ${k}: ${cur}"
+          echo "=== 一次性产出 .config ==="
+          cp /tmp/allconfig out/.config
+          yes '' 2>/dev/null | make O=out KCONFIG_ALLCONFIG=/tmp/allconfig olddefconfig > /tmp/cfg.log 2>&1
+          RC=$?
+          echo "  退出码 $RC"
+          tail -4 /tmp/cfg.log || true
+          if [ "$RC" -ne 0 ]; then
+            echo "  [note] olddefconfig 返回非 0（可能是 (NEW) 提问读到 EOF），继续但下面要核对"
+          fi
+
+          echo ""
+          echo "=== 产出结果（此后一行都不改）==="
+          echo "--- CFI / LTO / 编译器 ---"
+          for k in CC_IS_CLANG CC_IS_GCC CLANG_VERSION GCC_VERSION LD_IS_LLD \
+                   LTO LTO_CLANG LTO_NONE THINLTO \
+                   CFI CFI_CLANG CFI_CLANG_SHADOW; do
+            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
           done
 
-          echo ""
-          echo "=== 触摸屏驱动逐个确认（丢了开机没触摸）==="
+          echo "--- f2fs ---"
+          for k in F2FS_FS F2FS_FS_COMPRESSION F2FS_FS_LZO F2FS_FS_LZ4 F2FS_FS_ZSTD; do
+            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
+          done
+
+          echo "--- 触摸屏 ---"
           for k in TOUCHPANEL_NOVA_NT36672C_NOFLASH TOUCHPANEL_FOCAL_FT8006S_AA \
                    TOUCHPANEL_HIMAX_HX83102D_NOFLASH TOUCHPANEL_ILITEK_ILITEK7807S \
-                   TOUCHPANEL_CHIPONE_ICNL9911C TOUCHPANEL_NOVA_NT36525B_NOFLASH; do
-            cur=$(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo "  (无)")
-            echo "  ${k}: ${cur}"
+                   TOUCHPANEL_CHIPONE_ICNL9911C; do
+            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
+          done
+
+          echo "--- 我们要的 ---"
+          for k in MODVERSIONS SYSVIPC IPC_NS USER_NS DEVTMPFS POSIX_MQUEUE \
+                   OPLUS_FEATURE_OPROJECT LOCALVERSION; do
+            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
           done
 
           echo ""
-          echo "=== LOCALVERSION 必须为空（由脏树自动加 +）==="
-          if grep -q '^CONFIG_LOCALVERSION=' out/.config; then
-            sed -i 's|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=""|' out/.config
-          else
-            printf 'CONFIG_LOCALVERSION=""\n' >> out/.config
-          fi
-          grep -n '^CONFIG_LOCALVERSION' out/.config
-
-          echo ""
-          echo "=== Droidspaces 必需 8 项 ==="
-          for kv in CONFIG_SYSVIPC=y CONFIG_SYSVIPC_SYSCTL=y CONFIG_IPC_NS=y \
-                    CONFIG_USER_NS=y CONFIG_CGROUP_PIDS=y CONFIG_DEVTMPFS=y \
-                    CONFIG_DEVTMPFS_MOUNT=y CONFIG_POSIX_MQUEUE=y; do
-            sym="${kv%%=*}"
-            if grep -q "^${sym}=" out/.config; then
-              sed -i "s|^${sym}=.*|${kv}|" out/.config
-            elif grep -q "^# ${sym} is not set" out/.config; then
-              sed -i "s|^# ${sym} is not set|${kv}|" out/.config
-            else
-              printf '%s\n' "$kv" >> out/.config
-            fi
-          done
-
-          echo "=== OPPO 模块 ==="
-          for kv in CONFIG_OPLUS_FEATURE_OPROJECT=y CONFIG_OPLUS_FEATURE_FEEDBACK=y; do
-            sym="${kv%%=*}"
-            if grep -q "^${sym}=" out/.config; then
-              sed -i "s|^${sym}=.*|${kv}|" out/.config
-            elif grep -q "^# ${sym} is not set" out/.config; then
-              sed -i "s|^# ${sym} is not set|${kv}|" out/.config
-            else
-              printf '%s\n' "$kv" >> out/.config
-            fi
-          done
-
-          echo "=== MODULE_SIG 关闭（无 OPPO 私钥）==="
-          for s in MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL; do
-            if grep -q "^CONFIG_${s}=" out/.config; then
-              sed -i "s|^CONFIG_${s}=.*|# CONFIG_${s} is not set|" out/.config
-            fi
-          done
-
-          echo ""
-          echo "=== 最终 config 统计 ==="
-          echo "  =y 项: $(grep -c '=y$' out/.config || true)"
-          echo "  总项:  $(grep -cE '^CONFIG_|^# CONFIG_' out/.config || true)"
-          echo "  原厂:  $(grep -cE '^CONFIG_|^# CONFIG_' /tmp/stock.config || true)"
-          git status --porcelain 2>/dev/null | wc -l | xargs echo "  脏文件数:"
+          echo "=== 统计 ==="
+          echo "  =y:   $(grep -c '=y$' out/.config || true)"
+          echo "  总项: $(grep -cE '^CONFIG_|^# CONFIG_' out/.config || true)"
+          echo "  原厂: $(grep -cE '^CONFIG_|^# CONFIG_' /tmp/stock.config || true)"
+          echo "  md5:  $(md5sum out/.config)"
+          echo "  脏文件数: $(git status --porcelain 2>/dev/null | wc -l)"
 
       - name: Build with clang + LTO + CFI
         run: |

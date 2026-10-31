@@ -425,6 +425,33 @@ jobs:
           echo "=== 全部导出符号数 ==="
           wc -l "$GITHUB_WORKSPACE/out/Module.symvers" 2>/dev/null || true
 
+          # ★★★ 探针：量 sizeof(struct module) ★★★
+          # vendor ko 里 .gnu.linkonce.this_module 段大小 = 原厂 sizeof(struct module)
+          # 实测 10 个 ko 全是 1024 字节
+          # 如果新内核量出来不是 1024，说明 struct module 布局真的变了，
+          # 那就绝不能改 ko 的 CRC 去骗校验（会按错误偏移访问内核数据 → 随机 panic）
+          echo ""
+          echo "=== 探针：sizeof(struct module) ==="
+          export PATH="$CLANG_DIR/bin:$PATH"
+          PROBE=/tmp/probe
+          rm -rf "$PROBE"; mkdir -p "$PROBE"
+          # 用 base64 写文件，绕开 YAML heredoc 缩进问题（这个项目的老坑）
+          echo 'I2luY2x1ZGUgPGxpbnV4L21vZHVsZS5oPgojaW5jbHVkZSA8bGludXgva2VybmVsLmg+Ck1PRFVMRV9MSUNFTlNFKCJHUExJIik7CnN0YXRpYyBpbnQgX19pbml0IHBfaW5pdCh2b2lkKSB7IHJldHVybiAwOyB9CnN0YXRpYyB2b2lkIF9fZXhpdCBwX2V4aXQodm9pZCkgeyB9Cm1vZHVsZV9pbml0KHBfaW5pdCk7Cm1vZHVsZV9leGl0KHBfZXhpdCk7Cg==' | base64 -d > "$PROBE/probe.c"
+          echo 'b2JqLW0gOj0gcHJvYmUubwo=' | base64 -d > "$PROBE/Makefile"
+          cat "$PROBE/probe.c"
+          make -C "$GITHUB_WORKSPACE/out" M="$PROBE" \
+               ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+               CC="clang --target=aarch64-linux-gnu" \
+               LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
+               modules 2>&1 | tail -5 || echo "(probe 编译失败)"
+          if [ -f "$PROBE/probe.ko" ]; then
+            cp "$PROBE/probe.ko" "$GITHUB_WORKSPACE/artifacts/probe.ko"
+            echo "--- probe.ko 的 this_module 段大小（关键！应为 1024）---"
+            (llvm-readelf -S -W "$PROBE/probe.ko" 2>/dev/null || readelf -S -W "$PROBE/probe.ko") | grep -i 'this_module'
+          else
+            echo "(probe.ko 没生成)"
+          fi
+
       - name: Upload
         if: always()
         uses: actions/upload-artifact@v4

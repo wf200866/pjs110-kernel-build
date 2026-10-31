@@ -467,6 +467,15 @@ jobs:
           setkv CONFIG_TOUCHPANEL_LATE_INIT y
           setkv CONFIG_TOUCHPANEL_NT_PEN_SUPPORT y
           setkv CONFIG_TOUCHPANEL_NT_DIGITALNOISE_TEST y
+          # f2fs 压缩：原厂 y，/data 是 f2fs，缺了可能挂载失败
+          # 注意：COMPRESSION 在 config 里是 "is not set" 而非整行消失，
+          # 说明 symbol 存在但被判定成 n，必须显式指定才生效。
+          setkv CONFIG_F2FS_FS_COMPRESSION y
+          setkv CONFIG_F2FS_FS_LZO y
+          setkv CONFIG_F2FS_FS_LZ4 y
+          setkv CONFIG_F2FS_FS_LZ4HC y
+          setkv CONFIG_F2FS_FS_ZSTD y
+          setkv CONFIG_LZ4HC_COMPRESS y
           # OPPO 模块
           setkv CONFIG_OPLUS_FEATURE_OPROJECT y
           setkv CONFIG_OPLUS_FEATURE_FEEDBACK y
@@ -540,6 +549,11 @@ jobs:
 
           echo "--- f2fs ---"
           for k in F2FS_FS F2FS_FS_COMPRESSION F2FS_FS_LZO F2FS_FS_LZ4 F2FS_FS_ZSTD; do
+            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
+          done
+
+          echo "--- f2fs 压缩 ---"
+          for k in F2FS_FS_COMPRESSION F2FS_FS_LZO F2FS_FS_LZ4 F2FS_FS_ZSTD LZ4HC_COMPRESS; do
             echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
           done
 

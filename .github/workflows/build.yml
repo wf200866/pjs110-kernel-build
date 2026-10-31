@@ -223,45 +223,144 @@ jobs:
           fi
 
           echo "===== H. -Werror 全量降级（clang 下警告更多）====="
-          grep -rl -- "-Werror" --include=Makefile --include=Kbuild --include="*.mk" . 2>/dev/null | while read -r f; do
+          grep -rl -- "-Werror" --include=Makefile --include=Kbuild \
+               --include="*.mk" --include="*.mak" . 2>/dev/null | while read -r f; do
             sed -i 's/-Werror=/-Wno-error=/g; s/-Werror-\([A-Za-z0-9_-]*\)/-Wno-error=\1/g; s/\(^\|[[:space:]]\)-Werror\([[:space:]]\|$\)/\1-Wno-error\2/g' "$f"
           done
-          echo "  剩余 -Werror: $(grep -rn -- '-Werror' --include=Makefile . 2>/dev/null | wc -l)"
+          # vendor 侧也扫一遍
+          grep -rl -- "-Werror" --include=Makefile --include=Kbuild \
+               --include="*.mk" --include="*.mak" "$V" 2>/dev/null | while read -r f; do
+            sed -i 's/-Werror=/-Wno-error=/g; s/-Werror-\([A-Za-z0-9_-]*\)/-Wno-error=\1/g; s/\(^\|[[:space:]]\)-Werror\([[:space:]]\|$\)/\1-Wno-error\2/g' "$f"
+          done
+          echo "  剩余 -Werror(Makefile): $(grep -rn -- '-Werror' --include=Makefile . 2>/dev/null | wc -l)"
+          # subdir-ccflags 里也塞一份，覆盖所有子目录
+          if ! grep -q 'Wno-error=sizeof-pointer-memaccess' Makefile; then
+            printf '\n# clang 下大量历史代码触发的新警告，统一降级\nKBUILD_CFLAGS += -Wno-error=sizeof-pointer-memaccess -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=stringop-truncation -Wno-error=stringop-overflow -Wno-error=stringop-overread -Wno-error=array-bounds -Wno-error=address-of-packed-member -Wno-error=tautological-compare -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-function -Wno-error=unused-value -Wno-error=unused-label -Wno-error=missing-braces -Wno-error=parentheses -Wno-error=switch -Wno-error=misleading-indentation -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=declaration-after-statement -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=return-type -Wno-error=strict-prototypes -Wno-error=old-style-definition -Wno-error=missing-prototypes -Wno-error=deprecated-declarations -Wno-error=unused-result -Wno-error=builtin-declaration-mismatch -Wno-error=maybe-uninitialized -Wno-error=memset-elt-size\n' >> Makefile
+            echo "  [ok]   Makefile 追加 clang 警告降级"
+          fi
 
           [ "$fail" -eq 0 ] && echo "ALL PATCHES OK" || { echo "!! 有必改项失败"; exit 1; }
 
       - name: Prepare config (对齐原厂 clang/LTO/CFI)
         run: |
           set -eu
-          cp /tmp/stock.config out.config
-          echo "=== 原厂 config 里的关键项（应该已经是开着的）==="
-          grep -E '^CONFIG_(CC_IS_CLANG|LD_IS_LLD|CLANG_VERSION|LTO|LTO_CLANG|THINLTO|CFI|CFI_CLANG|CFI_CLANG_SHADOW)=' out.config || true
+          export PATH="$HOME/clang/bin:$PATH"
+          export ARCH=arm64 SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
+          export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
 
-          echo "=== 确保 LOCALVERSION 为空（由脏树自动加 +）==="
-          if grep -q '^CONFIG_LOCALVERSION=' out.config; then
-            sed -i 's|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=""|' out.config
+          mkdir -p out
+          cp /tmp/stock.config out/.config
+
+          # ★★★ 关键：先跑一次 olddefconfig，让 kconfig 把 (NEW) symbol 全部
+          # 按默认值算完。这一步会重算，会丢掉一些原厂的 =y。
+          # 所以必须在它之后、make 之前，把关键项再写回去。
+          # 之前漏了这一步，导致 make 期间隐式 silentoldconfig 弹 (NEW) 提问
+          # 读 stdin 失败 → 整份 config 被按默认重算 → f2fs 压缩等 117 项丢失。
+          echo "=== olddefconfig（先落定，别让它污染后面的 make）==="
+          yes '' 2>/dev/null | make O=out olddefconfig > /tmp/oldcfg.log 2>&1 || true
+          tail -5 /tmp/oldcfg.log || true
+
+          echo "=== 落定后的状态（这是被重算过的，可能已经丢了东西）==="
+          grep -cE '^CONFIG_.*=|^# CONFIG_.*is not set' out/.config || true
+
+          echo ""
+          echo "=== ★ 强制回写：原厂有的项，被 olddefconfig 丢掉的一律补回 ==="
+          # 三种情况都要处理：
+          #   1. 变成 "# CONFIG_X is not set"  → 替换
+          #   2. 变成 "CONFIG_X=n"（罕见）      → 替换
+          #   3. 整行消失                       → 追加
+          FIXED_REPL=0
+          FIXED_ADD=0
+          while IFS= read -r line; do
+            case "$line" in
+              CONFIG_*=y|CONFIG_*=m|CONFIG_*=\"*\") ;;
+              *) continue ;;
+            esac
+            sym="${line%%=*}"
+            if grep -q "^${sym}=" out/.config 2>/dev/null; then
+              :  # 还在，不动
+            elif grep -q "^# ${sym} is not set" out/.config 2>/dev/null; then
+              sed -i "s|^# ${sym} is not set|${line}|" out/.config
+              FIXED_REPL=$((FIXED_REPL+1))
+            else
+              printf '%s\n' "$line" >> out/.config
+              FIXED_ADD=$((FIXED_ADD+1))
+            fi
+          done < /tmp/stock.config
+          echo "  替换 is-not-set: $FIXED_REPL 项"
+          echo "  整行补回:       $FIXED_ADD 项"
+
+          echo ""
+          echo "=== 逐个确认关键项 ==="
+          for k in F2FS_FS_COMPRESSION F2FS_FS_LZO F2FS_FS_LZ4 F2FS_FS_ZSTD \
+                   F2FS_FS_ENCRYPTION RELR TOOLS_SUPPORT_RELR \
+                   CFI CFI_CLANG CFI_CLANG_SHADOW LTO_CLANG THINLTO \
+                   CC_IS_CLANG LD_IS_LLD CLANG_VERSION; do
+            cur=$(grep -m1 "^${k}=" out/.config || grep -m1 "^# ${k} is not set" out/.config || echo "  (无)")
+            echo "  ${k}: ${cur}"
+          done
+
+          echo ""
+          echo "=== 触摸屏驱动逐个确认（丢了开机没触摸）==="
+          for k in TOUCHPANEL_NOVA_NT36672C_NOFLASH TOUCHPANEL_FOCAL_FT8006S_AA \
+                   TOUCHPANEL_HIMAX_HX83102D_NOFLASH TOUCHPANEL_ILITEK_ILITEK7807S \
+                   TOUCHPANEL_CHIPONE_ICNL9911C TOUCHPANEL_NOVA_NT36525B_NOFLASH; do
+            cur=$(grep -m1 "^${k}=" out/.config || grep -m1 "^# ${k} is not set" out/.config || echo "  (无)")
+            echo "  ${k}: ${cur}"
+          done
+
+          echo ""
+          echo "=== LOCALVERSION 必须为空（由脏树自动加 +）==="
+          if grep -q '^CONFIG_LOCALVERSION=' out/.config; then
+            sed -i 's|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=""|' out/.config
           else
-            printf 'CONFIG_LOCALVERSION=""\n' >> out.config
+            printf 'CONFIG_LOCALVERSION=""\n' >> out/.config
           fi
-          grep -n '^CONFIG_LOCALVERSION' out.config
+          grep -n '^CONFIG_LOCALVERSION' out/.config
 
+          echo ""
           echo "=== Droidspaces 必需 8 项 ==="
-          printf '\nCONFIG_SYSVIPC=y\nCONFIG_SYSVIPC_SYSCTL=y\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_POSIX_MQUEUE=y\n' >> out.config
+          for kv in CONFIG_SYSVIPC=y CONFIG_SYSVIPC_SYSCTL=y CONFIG_IPC_NS=y \
+                    CONFIG_USER_NS=y CONFIG_CGROUP_PIDS=y CONFIG_DEVTMPFS=y \
+                    CONFIG_DEVTMPFS_MOUNT=y CONFIG_POSIX_MQUEUE=y; do
+            sym="${kv%%=*}"
+            if grep -q "^${sym}=" out/.config; then
+              sed -i "s|^${sym}=.*|${kv}|" out/.config
+            elif grep -q "^# ${sym} is not set" out/.config; then
+              sed -i "s|^# ${sym} is not set|${kv}|" out/.config
+            else
+              printf '%s\n' "$kv" >> out/.config
+            fi
+          done
 
-          echo "=== OPPO 模块（原厂 config 未开，但代码需要）==="
-          printf 'CONFIG_OPLUS_FEATURE_OPROJECT=y\nCONFIG_OPLUS_FEATURE_FEEDBACK=y\n' >> out.config
+          echo "=== OPPO 模块 ==="
+          for kv in CONFIG_OPLUS_FEATURE_OPROJECT=y CONFIG_OPLUS_FEATURE_FEEDBACK=y; do
+            sym="${kv%%=*}"
+            if grep -q "^${sym}=" out/.config; then
+              sed -i "s|^${sym}=.*|${kv}|" out/.config
+            elif grep -q "^# ${sym} is not set" out/.config; then
+              sed -i "s|^# ${sym} is not set|${kv}|" out/.config
+            else
+              printf '%s\n' "$kv" >> out/.config
+            fi
+          done
 
           echo "=== MODULE_SIG 关闭（无 OPPO 私钥）==="
-          sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out.config
-          sed -i 's/^CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/' out.config
-          sed -i 's/^CONFIG_MODULE_SIG_ALL=y/# CONFIG_MODULE_SIG_ALL is not set/' out.config
+          for s in MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL; do
+            if grep -q "^CONFIG_${s}=" out/.config; then
+              sed -i "s|^CONFIG_${s}=.*|# CONFIG_${s} is not set|" out/.config
+            fi
+          done
 
-          echo "=== 最终核对 ==="
-          grep -E '^CONFIG_(SYSVIPC|IPC_NS|USER_NS|CGROUP_PIDS|DEVTMPFS|POSIX_MQUEUE|MODVERSIONS|OPLUS_FEATURE_OPROJECT|LTO_CLANG|CFI_CLANG)=' out.config || true
-          grep -E '^# CONFIG_MODULE_SIG' out.config || true
-          echo "=== 树是否脏（决定 vermagic 加号）==="
-          git status --porcelain 2>/dev/null | head -3 || echo "非 git 树"
-          echo "脏文件数: $(git status --porcelain 2>/dev/null | wc -l)"
+          echo ""
+          echo "=== 最终 config 统计 ==="
+          echo "  =y 项: $(grep -c '=y$' out/.config || true)"
+          echo "  总项:  $(grep -cE '^CONFIG_|^# CONFIG_' out/.config || true)"
+          echo "  原厂:  $(grep -cE '^CONFIG_|^# CONFIG_' /tmp/stock.config || true)"
+          git status --porcelain 2>/dev/null | wc -l | xargs echo "  脏文件数:"
 
       - name: Build with clang + LTO + CFI
         run: |
@@ -280,24 +379,40 @@ jobs:
           export STRIP=llvm-strip
           export READELF=llvm-readelf
 
+          # ★ 关键：禁止 kbuild 在 make 期间静默更新 .config。
+          # 不加这个，make 会隐式跑 silentoldconfig，碰到 (NEW) symbol
+          # 就去读 stdin，CI 里 stdin 空 → 读失败 → 整份 config 按默认重算
+          # → f2fs 压缩、触摸驱动等 117 项丢失 → 刷了卡 logo / 没触摸。
+          export KCONFIG_NOSILENTUPDATE=1
+
           echo "=== 工具链版本 ==="
           clang --version | head -2
           ld.lld --version
 
-          mkdir -p out
-          cp out.config out/.config
+          echo "=== 确认 .config 没被改（和 Prepare 阶段 md5 对上）==="
+          md5sum out/.config
+          grep -c '=y$' out/.config || true
 
           make O=out ARCH=arm64 -j$(nproc) Image.gz > /tmp/build.log 2>&1
           RC=$?
           set -e
 
           echo "=== BUILD EXIT: $RC ==="
+          echo "=== 是否又发生 config 重算 ==="
+          grep -c 'Restart config' /tmp/build.log && echo "  !! 又重算了" || echo "  [OK] 没有重算"
+          grep -c 'Error in reading or end of file' /tmp/build.log && echo "  !! 又有读 stdin 失败" || echo "  [OK] 没有 stdin 失败"
+
           echo "=== error 行（最多 80）==="
           grep -E "error:|fatal error:" /tmp/build.log | grep -v -E "TPD_INFO|printk|dev_info|dev_err" | head -80 || true
           echo "=== 最后 30 行 ==="
           tail -30 /tmp/build.log || true
           echo "=== 产物 ==="
           ls -la out/arch/arm64/boot/ 2>&1 | head -20 || true
+
+          echo "=== 编完后再验 config 关键项还在不在 ==="
+          for k in F2FS_FS_COMPRESSION CFI_CLANG LTO_CLANG THINLTO; do
+            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo 无)"
+          done
 
           if [ "$RC" -ne 0 ]; then exit 1; fi
 

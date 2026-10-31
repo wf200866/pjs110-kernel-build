@@ -259,9 +259,19 @@ jobs:
           # 所以必须在它之后、make 之前，把关键项再写回去。
           # 之前漏了这一步，导致 make 期间隐式 silentoldconfig 弹 (NEW) 提问
           # 读 stdin 失败 → 整份 config 被按默认重算 → f2fs 压缩等 117 项丢失。
-          echo "=== olddefconfig（先落定，别让它污染后面的 make）==="
-          yes '' 2>/dev/null | make O=out olddefconfig > /tmp/oldcfg.log 2>&1 || true
-          tail -5 /tmp/oldcfg.log || true
+          echo "=== olddefconfig + KCONFIG_ALLCONFIG（以原厂值为准，不用默认）==="
+          # 关键：KCONFIG_ALLCONFIG 指向原厂 config，kconfig 会优先采用里面的值，
+          # 而不是在遇到 (NEW) symbol 时询问/取默认值。
+          # 之前只跑 olddefconfig，结果它把 35 个 symbol 整行删了（按默认 n 处理）。
+          # 现在用 ALLCONFIG 强制以原厂为准，一步到位，不需要事后手工回写。
+          cp /tmp/stock.config /tmp/allconfig
+          yes '' 2>/dev/null | make O=out KCONFIG_ALLCONFIG=/tmp/allconfig allnoconfig > /tmp/oldcfg.log 2>&1 || true
+          echo "  allnoconfig 完成，退出码 $?"
+          tail -3 /tmp/oldcfg.log || true
+
+          echo "=== 再跑一次 olddefconfig 收敛（此时 ALLCONFIG 已生效）==="
+          yes '' 2>/dev/null | make O=out KCONFIG_ALLCONFIG=/tmp/allconfig olddefconfig >> /tmp/oldcfg.log 2>&1 || true
+          tail -3 /tmp/oldcfg.log || true
 
           echo "=== 落定后的状态（这是被重算过的，可能已经丢了东西）==="
           grep -cE '^CONFIG_.*=|^# CONFIG_.*is not set' out/.config || true
@@ -299,7 +309,7 @@ jobs:
                    F2FS_FS_ENCRYPTION RELR TOOLS_SUPPORT_RELR \
                    CFI CFI_CLANG CFI_CLANG_SHADOW LTO_CLANG THINLTO \
                    CC_IS_CLANG LD_IS_LLD CLANG_VERSION; do
-            cur=$(grep -m1 "^${k}=" out/.config || grep -m1 "^# ${k} is not set" out/.config || echo "  (无)")
+            cur=$(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo "  (无)")
             echo "  ${k}: ${cur}"
           done
 
@@ -308,7 +318,7 @@ jobs:
           for k in TOUCHPANEL_NOVA_NT36672C_NOFLASH TOUCHPANEL_FOCAL_FT8006S_AA \
                    TOUCHPANEL_HIMAX_HX83102D_NOFLASH TOUCHPANEL_ILITEK_ILITEK7807S \
                    TOUCHPANEL_CHIPONE_ICNL9911C TOUCHPANEL_NOVA_NT36525B_NOFLASH; do
-            cur=$(grep -m1 "^${k}=" out/.config || grep -m1 "^# ${k} is not set" out/.config || echo "  (无)")
+            cur=$(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo "  (无)")
             echo "  ${k}: ${cur}"
           done
 

@@ -254,7 +254,27 @@ jobs:
           fi
           grep -n '^CONFIG_LOCALVERSION' out.config
           echo "  [ok]   LOCALVERSION 留空，由脏树自动追加 +"
-          # 保险：确认树确实是脏的（否则 + 不会出现）
+          # ★★★ 核心修复：把原厂所有 =y 的项强制恢复 ★★★
+          #
+          # 现象：42 个原厂 =y 的项在编译产物里变成了 N
+          #   其中包括 CONFIG_TOUCHPANEL_SYNAPTICS_TD4160（触摸驱动！）
+          #   以及一大批 CONFIG_OPLUS_FEATURE_* / CONFIG_MTK_*
+          #
+          # 根因：这些 symbol 所在的 Kconfig 没有被 source，autoconf 直接丢弃
+          #
+          # 后果：不只丢功能，还改 CRC —— 这些特性会通过头文件影响结构体定义
+          #   （例如给 struct device_node 加字段），而 genksyms 算 CRC 时会把
+          #   结构体完整展开。字段少了 → CRC 变 → vendor ko 全部拒载。
+          #
+          # 这就是 module_layout / of_* / cfg80211_* 那 129 个符号 CRC 不匹配的真正原因
+          echo "  --- 恢复原厂 =y 项 ---"
+          echo 'CmltcG9ydCByZQpkZWYgbG9hZChwKToKICAgIGQgPSB7fQogICAgZm9yIGwgaW4gb3BlbihwLCBlcnJvcnM9J3JlcGxhY2UnKToKICAgICAgICBzID0gbC5yc3RyaXAoKQogICAgICAgIG0gPSByZS5tYXRjaChyJ14oQ09ORklHX1tBLVphLXowLTlfXSspPSguKikkJywgcykKICAgICAgICBpZiBtOgogICAgICAgICAgICBkW20uZ3JvdXAoMSldID0gbS5ncm91cCgyKQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIG0gPSByZS5tYXRjaChyJ14jIChDT05GSUdfW0EtWmEtejAtOV9dKykgaXMgbm90IHNldCQnLCBzKQogICAgICAgIGlmIG06CiAgICAgICAgICAgIGRbbS5ncm91cCgxKV0gPSAnbicKICAgIHJldHVybiBkCgphID0gbG9hZCgnL3RtcC9zdG9jay5jb25maWcnKQpiID0gbG9hZCgnb3V0LmNvbmZpZycpCmxvc3QgPSBbayBmb3IgayBpbiBhIGlmIGFba10gPT0gJ3knIGFuZCBiLmdldChrKSAhPSAneSddCnByaW50KCcgIHN0b2NrPXkgYnV0IG5vdyE9eTogJWQnICUgbGVuKGxvc3QpKQpsaW5lcyA9IG9wZW4oJ291dC5jb25maWcnLCBlcnJvcnM9J3JlcGxhY2UnKS5yZWFkKCkuc3BsaXRsaW5lcyhUcnVlKQpwcmVzZW50ID0gc2V0KCkKZml4ZWQgPSAwCmZvciBpLCBsIGluIGVudW1lcmF0ZShsaW5lcyk6CiAgICBtID0gcmUubWF0Y2gocideKD86IyApPyhDT05GSUdfW0EtWmEtejAtOV9dKykoPzo9fCBpcyBub3Qgc2V0KScsIGwpCiAgICBpZiBtOgogICAgICAgIGsgPSBtLmdyb3VwKDEpCiAgICAgICAgcHJlc2VudC5hZGQoaykKICAgICAgICBpZiBrIGluIGxvc3Q6CiAgICAgICAgICAgIGxpbmVzW2ldID0gayArICc9eVxuJwogICAgICAgICAgICBmaXhlZCArPSAxCmFwID0gMApmb3IgayBpbiBsb3N0OgogICAgaWYgayBub3QgaW4gcHJlc2VudDoKICAgICAgICBsaW5lcy5hcHBlbmQoayArICc9eVxuJykKICAgICAgICBhcCArPSAxCm9wZW4oJ291dC5jb25maWcnLCAndycpLndyaXRlbGluZXMobGluZXMpCnByaW50KCcgIGZpeGVkICVkIGFwcGVuZGVkICVkJyAlIChmaXhlZCwgYXApKQphZnRlciA9IGxvYWQoJ291dC5jb25maWcnKQpzdGlsbCA9IFtrIGZvciBrIGluIGEgaWYgYVtrXSA9PSAneScgYW5kIGFmdGVyLmdldChrKSAhPSAneSddCnByaW50KCcgIHN0aWxsIG1pc3Npbmc6ICVkJyAlIGxlbihzdGlsbCkpCg==' | base64 -d > /tmp/restore_cfg.py
+          python3 /tmp/restore_cfg.py || true
+          echo "  --- 恢复后关键项 ---"
+          grep -E '^CONFIG_(TOUCHPANEL_SYNAPTICS_TD4160|OPLUS_FEATURE_DNS_HOOK|OPLUS_BLK_MONITOR|OPLUS_CHIP_SOC_NODE|MODULE_SIG_FORCE)=' out.config || true
+          echo "  --- 当前 y 项总数 ---"
+          grep -cE '^CONFIG_[A-Za-z0-9_]+=y$' out.config || true
+          # ★ 树是否脏（决定 vermagic 的 +）
           if git -C . rev-parse --git-dir >/dev/null 2>&1; then
             DIRTY=$(git -C . status --porcelain 2>/dev/null | head -1)
             [ -n "$DIRTY" ] && echo "  [ok]   树是脏的，会得到 +" || echo "  [!!] 树是干净的，vermagic 会缺 +"
@@ -262,7 +282,6 @@ jobs:
             echo "  [note] 非 git 树，kbuild 会按 setlocalversion 规则处理"
           fi
           # Droidspaces 必需
-          # ★ 二次排查结论（2026-10-31）：
           #   CONFIG_SYSVIPC / POSIX_MQUEUE 会给 task_struct 加字段，
           #   但 module_layout 的 CRC 只对 struct module 计算，与 task_struct 无关。
           #   → 这两项掉 ko 的锅是无辜的，可以放心开。

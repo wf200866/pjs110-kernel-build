@@ -1,4 +1,4 @@
-name: Build PJS110 Kernel (clang + LTO + CFI)
+name: Build PJS110 Kernel
 
 on:
   workflow_dispatch:
@@ -35,226 +35,63 @@ jobs:
             https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/pjs110_stock.config
           wc -l /tmp/stock.config
 
-      - name: Toolchain - AOSP clang r383902
+      - name: Toolchain
         run: |
-          set -e
-          echo "=== 下载 AOSP clang r383902 (clang 11.0.1，与原厂一致) ==="
-          mkdir -p "$HOME/clang"
-          cd "$HOME/clang"
-          curl -sL -o clang.tar.gz \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz"
-          ls -la clang.tar.gz
-          tar xzf clang.tar.gz -C "$HOME/clang"
-          rm -f clang.tar.gz
-          echo "=== 版本确认 ==="
-          "$HOME/clang/bin/clang" --version
-          "$HOME/clang/bin/ld.lld" --version
-          echo "=== 依赖 ==="
           sudo apt-get update -qq
           sudo apt-get install -y -qq make libncurses-dev flex bison libssl-dev bc \
-                                    gcc-aarch64-linux-gnu cpio python3 zstd
+                                    gcc-aarch64-linux-gnu cpio
 
-      - name: Patch OPPO source defects (仅文件缺失/语法错误)
+      - name: Patch OPPO source defects
         run: |
           set -u
           V="$(dirname "$GITHUB_WORKSPACE")/vendor"
           fail=0
           ok()  { if [ "$1" = "0" ]; then echo "  [ok]   $2"; else echo "  [FAIL] $2"; fail=1; fi; }
 
-          echo "===== A. fs/proc/Kconfig 缺 cpu_jankinfo ====="
+          echo "===== A. fs/proc/Kconfig ====="
           sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
           ok $? "去掉 cpu_jankinfo 引用"
 
-          echo "===== A2. core 头文件 always_inline 无 body（与编译器无关，clang 也报）====="
-          sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h
-          ok $? "mm.h handle_chp_ext_cmd"
-          sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h
-          ok $? "sched.h uclamp_se_set"
+          echo "===== B. core 头文件 inline 声明 ====="
+          sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h 2>/dev/null || true
+          sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h 2>/dev/null || true
           sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h 2>/dev/null || true
           sed -i 's/^inline void blk_crypto_flock/extern void blk_crypto_flock/' include/linux/blk-crypto.h 2>/dev/null || true
-          grep -n 'handle_chp_ext_cmd' include/linux/mm.h | head -3
-          grep -n 'uclamp_se_set' kernel/sched/sched.h | head -3
 
-          echo "===== A3. vendor 侧 always_inline 无 body（clang 下同样报）====="
-          # is_audio_task: 声明 extern inline，定义是 inline（gnu89/clang 都不发射外部符号）
-          BINDER="$V/oplus/kernel/oplus_performance/sched_assist/sched_assist_binder.h"
-          SAC="$V/oplus/kernel/oplus_performance/sched_assist/sched_assist_common.c"
-          if [ -f "$BINDER" ]; then
-            sed -i 's/^extern inline bool is_audio_task/extern bool is_audio_task/' "$BINDER"
-            ok $? "binder.h is_audio_task"
+          echo "===== C0. 通用 inline 降级（全树 + vendor） ====="
+          echo 'aW1wb3J0IHJlLCBvcywgc3lzCgojIOmAmueUqCBpbmxpbmUg6ZmN57qn5ZmoCiMg6Kej5YazIGdudTg5L0M5OSBpbmxpbmUg6K+t5LmJ5re355So5a+86Ie055qE77yaCiMgICAiaW5saW5pbmcgZmFpbGVkIGluIGNhbGwgdG8gJ2Fsd2F5c19pbmxpbmUnIFhYWDogZnVuY3Rpb24gYm9keSBub3QgYXZhaWxhYmxlIgojCiMg6KeE5YiZ77yI5L+d5a6I77yM5LuF5Lik57G777yJ77yaCiMgICAxKSDlpLTmlofku7bnuq/lo7DmmI7vvJogIFtleHRlcm5dIGlubGluZSBUWVBFIGZuKGFyZ3MpOyAgLT4gIGV4dGVybiBUWVBFIGZuKGFyZ3MpOwojICAgMikgLmMg5paH5Lu25a6a5LmJ77yaICAgaW5saW5lIFRZUEUgZm4oYXJncykgeyAgICAgICAgIC0+ICBUWVBFIGZuKGFyZ3MpIHsKIyDkuI3liqjvvJoKIyAgIC0gc3RhdGljIGlubGluZe+8iOWktOaWh+S7tuecnyBpbmxpbmXvvIzlronlhajvvIkKIyAgIC0g5aS05paH5Lu26YeM5bim5Ye95pWw5L2T55qEIGlubGluZe+8iOaUueS6huS8mumHjeWkjeWumuS5ie+8iQojICAgLSDlkKsgX19hdHRyaWJ1dGVfXyDnmoTooYwKCkRFQ0wgPSByZS5jb21waWxlKHInXihccyopKD86ZXh0ZXJuXHMrKT9pbmxpbmVccysoW0EtWmEtel9dW1x3IFx0XCpdKj8pXGIoXHcrKVxzKlwoKFteO10qKVwpXHMqO1xzKiQnKQpERUYgPSByZS5jb21waWxlKHInXihccyopaW5saW5lXHMrKFtBLVphLXpfXVtcdyBcdFwqXSo/KVxiKFx3KylccypcKChbXildKilcKVxzKihceyk/XHMqJCcpClNLSVAgPSB7J21haW4nfQoKCmRlZiBwcm9jZXNzKHBhdGgsIGlzX2hlYWRlcik6CiAgICB0cnk6CiAgICAgICAgbGluZXMgPSBvcGVuKHBhdGgsIGVuY29kaW5nPSd1dGYtOCcsIGVycm9ycz0nc3Vycm9nYXRlZXNjYXBlJykucmVhZGxpbmVzKCkKICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgcmV0dXJuIDAKICAgIGNoYW5nZWQsIG91dCA9IDAsIFtdCiAgICBmb3IgbG4gaW4gbGluZXM6CiAgICAgICAgcyA9IGxuLmxzdHJpcCgpCiAgICAgICAgaWYgcy5zdGFydHN3aXRoKCdzdGF0aWMgJykgb3IgJ3N0YXRpYyBpbmxpbmUnIGluIGxuOgogICAgICAgICAgICBvdXQuYXBwZW5kKGxuKQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGlmIHJlLm1hdGNoKHInXlxzKiMnLCBsbikgb3IgJ19fYXR0cmlidXRlX18nIGluIGxuOgogICAgICAgICAgICBvdXQuYXBwZW5kKGxuKQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIG0gPSBERUNMLm1hdGNoKGxuKQogICAgICAgIGlmIG0gYW5kIGlzX2hlYWRlcjoKICAgICAgICAgICAgaW5kLCB0eXAsIG5hbWUsIGFyZ3MgPSBtLmdyb3VwcygpCiAgICAgICAgICAgIGlmIG5hbWUgaW4gU0tJUDoKICAgICAgICAgICAgICAgIG91dC5hcHBlbmQobG4pCiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICBuZXdsaW5lID0gaW5kICsgJ2V4dGVybiAnICsgdHlwLnN0cmlwKCkgKyAnICcgKyBuYW1lICsgJygnICsgYXJncyArICcpOycgKyAnXG4nCiAgICAgICAgICAgIG91dC5hcHBlbmQobmV3bGluZSkKICAgICAgICAgICAgY2hhbmdlZCArPSAxCiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgbSA9IERFRi5tYXRjaChsbikKICAgICAgICBpZiBtIGFuZCBub3QgaXNfaGVhZGVyOgogICAgICAgICAgICBpbmQsIHR5cCwgbmFtZSwgYXJncywgYnIgPSBtLmdyb3VwcygpCiAgICAgICAgICAgIGlmIG5hbWUgaW4gU0tJUDoKICAgICAgICAgICAgICAgIG91dC5hcHBlbmQobG4pCiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICBuZXdsaW5lID0gaW5kICsgdHlwLnN0cmlwKCkgKyAnICcgKyBuYW1lICsgJygnICsgYXJncyArICcpJwogICAgICAgICAgICBpZiBicjoKICAgICAgICAgICAgICAgIG5ld2xpbmUgKz0gJyB7JwogICAgICAgICAgICBuZXdsaW5lICs9ICdcbicKICAgICAgICAgICAgb3V0LmFwcGVuZChuZXdsaW5lKQogICAgICAgICAgICBjaGFuZ2VkICs9IDEKICAgICAgICAgICAgY29udGludWUKICAgICAgICBvdXQuYXBwZW5kKGxuKQogICAgaWYgY2hhbmdlZDoKICAgICAgICBvcGVuKHBhdGgsICd3JywgZW5jb2Rpbmc9J3V0Zi04JywgZXJyb3JzPSdzdXJyb2dhdGVlc2NhcGUnKS53cml0ZWxpbmVzKG91dCkKICAgIHJldHVybiBjaGFuZ2VkCgoKZGVmIHdhbGsocm9vdHMpOgogICAgdG90LCBmaWxlcyA9IDAsIDAKICAgIGZvciByb290IGluIHJvb3RzOgogICAgICAgIGlmIG5vdCBvcy5wYXRoLmlzZGlyKHJvb3QpOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGZvciBkcCwgZG4sIGZucyBpbiBvcy53YWxrKHJvb3QpOgogICAgICAgICAgICBkbls6XSA9IFtkIGZvciBkIGluIGRuIGlmIGQgIT0gJy5naXQnXQogICAgICAgICAgICBmb3IgZm4gaW4gZm5zOgogICAgICAgICAgICAgICAgaWYgZm4uZW5kc3dpdGgoJy5oJyk6CiAgICAgICAgICAgICAgICAgICAgbiA9IHByb2Nlc3Mob3MucGF0aC5qb2luKGRwLCBmbiksIFRydWUpCiAgICAgICAgICAgICAgICBlbGlmIGZuLmVuZHN3aXRoKCcuYycpOgogICAgICAgICAgICAgICAgICAgIG4gPSBwcm9jZXNzKG9zLnBhdGguam9pbihkcCwgZm4pLCBGYWxzZSkKICAgICAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgICAgIGlmIG46CiAgICAgICAgICAgICAgICAgICAgdG90ICs9IG4KICAgICAgICAgICAgICAgICAgICBmaWxlcyArPSAxCiAgICAgICAgICAgICAgICAgICAgcHJpbnQoJyAgJyArIHN0cihuKSArICcgICcgKyBvcy5wYXRoLmpvaW4oZHAsIGZuKSkKICAgIHByaW50KCcgIOWQiOiuoSAnICsgc3RyKHRvdCkgKyAnIOWkhCAvICcgKyBzdHIoZmlsZXMpICsgJyDmlofku7YnKQogICAgcmV0dXJuIHRvdAoKCmlmIF9fbmFtZV9fID09ICdfX21haW5fXyc6CiAgICB3YWxrKHN5cy5hcmd2WzE6XSk=' | base64 -d > /tmp/inline_fix.py
+          python3 -c "import ast,sys; ast.parse(open('/tmp/inline_fix.py').read())" && echo "  [ok]   inline_fix.py 语法 OK"
+          echo "--- 内核树 ---"
+          python3 /tmp/inline_fix.py . 2>&1 | tail -50 || true
+          echo "--- vendor ---"
+          python3 /tmp/inline_fix.py "$V" 2>&1 | tail -50 || true
+          echo "--- 残留 ^extern inline ---"
+          echo -n "tree: "; grep -rn '^extern inline' drivers include kernel mm block fs net sound crypto security 2>/dev/null | wc -l
+          echo -n "vendor: "; grep -rn '^extern inline' "$V" --include=*.h --include=*.c 2>/dev/null | wc -l
+
+          echo "===== C1. sensor_devinfo.c 空参数 ====="
+          SDI="$V/oplus/sensor/kernel/oplus_sensor_devinfo/sensor_devinfo.c"
+          if [ -f "$SDI" ]; then
+            sed -i 's/^__attribute__((weak)) int register_lcdinfo_notifier() {/__attribute__((weak)) int register_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
+            sed -i 's/^__attribute__((weak)) int unregister_lcdinfo_notifier() {/__attribute__((weak)) int unregister_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
+            ok $? "sensor_devinfo.c 补原型"
+            grep -n 'lcdinfo_notifier' "$SDI" | head -6
+          else
+            echo "  [FAIL] 缺 $SDI"; fail=1
           fi
-          if [ -f "$SAC" ]; then
-            sed -i 's/^inline bool is_audio_task(struct task_struct \*task)/bool is_audio_task(struct task_struct *task)/' "$SAC"
-            ok $? "common.c is_audio_task 定义"
-          fi
-          # zram（内核树自己的那份 + vendor 那份）
-          ZK="drivers/block/zram/zram_drv_internal.h"
-          ZKC="drivers/block/zram/zram_drv.c"
-          if [ -f "$ZK" ]; then
-            sed -i 's/^extern inline bool is_thp_zram/extern bool is_thp_zram/' "$ZK"
-            sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' "$ZK"
-            ok $? "tree zram_drv_internal.h"
-          fi
-          if [ -f "$ZKC" ]; then
-            sed -i 's/^inline unsigned long zram_page_state(struct zram \*zram, int type)/unsigned long zram_page_state(struct zram *zram, int type)/' "$ZKC"
-            sed -i 's/^inline bool is_thp_zram(struct zram \*zram)/bool is_thp_zram(struct zram *zram)/' "$ZKC"
-            ok $? "tree zram_drv.c"
-          fi
-          ZH="$V/oplus/kernel/mm/hybridswap_zram/zram_drv_internal.h"
-          ZC="$V/oplus/kernel/mm/hybridswap_zram/zram_drv.c"
-          [ -f "$ZH" ] && {
-            sed -i 's/^extern inline bool is_chp_zram/extern bool is_chp_zram/' "$ZH"
-            sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' "$ZH"
-            echo "  [ok]   vendor zram_drv_internal.h"
+          SDI2="$V/oplus/sensor/kernel/sensorhub/oplus_sensor_devinfo/sensor_devinfo.c"
+          [ -f "$SDI2" ] && {
+            sed -i 's/^__attribute__((weak)) int register_lcdinfo_notifier() {/__attribute__((weak)) int register_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI2"
+            sed -i 's/^__attribute__((weak)) int unregister_lcdinfo_notifier() {/__attribute__((weak)) int unregister_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI2"
+            echo "  [ok]   sensorhub 版同步"
           }
-          [ -f "$ZC" ] && {
-            sed -i 's/^inline bool is_chp_zram(struct zram \*zram)/bool is_chp_zram(struct zram *zram)/' "$ZC"
-            sed -i 's/^inline unsigned long zram_page_state(struct zram \*zram, int type)/unsigned long zram_page_state(struct zram *zram, int type)/' "$ZC"
-            echo "  [ok]   vendor zram_drv.c"
-          }
-          # oplus_ofp_is_support
-          OFP_H="$V/oplus/kernel/../../../drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.h"
-          OFPH="drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.h"
-          OFPC="drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.c"
-          if [ -f "$OFPH" ]; then
-            sed -i 's/^inline bool oplus_ofp_is_support(void);/extern bool oplus_ofp_is_support(void);/' "$OFPH"
-            ok $? "ofp.h 声明"
-          fi
-          if [ -f "$OFPC" ]; then
-            sed -i 's/^inline bool oplus_ofp_is_support(void)$/bool oplus_ofp_is_support(void)/' "$OFPC"
-            ok $? "ofp.c 定义"
-          fi
-          # is_dma_buf_file（内核树已有实体，删多余声明）
-          [ -f "$V/oplus/kernel/mm/mm_osvelte/memstat.h" ] && sed -i '/^extern inline int is_dma_buf_file/d' "$V/oplus/kernel/mm/mm_osvelte/memstat.h"
-          # ws_all_release（无实体，删声明）
-          [ -f "$V/oplus/kernel/wakelock_profiler/oplus_wakelock_profiler_mtk.c" ] && sed -i '/^extern inline bool ws_all_release(void);$/d' "$V/oplus/kernel/wakelock_profiler/oplus_wakelock_profiler_mtk.c"
-          # 全 vendor 残留扫描
-          echo "  --- vendor 残留 ^extern inline ---"
-          grep -rn '^extern inline' "$V" --include=*.h --include=*.c 2>/dev/null | wc -l
 
-          echo "===== B. sensor_devinfo.c K&R 空参数（真语法错，与编译器无关）====="
-          for SDI in \
-            "$V/oplus/sensor/kernel/oplus_sensor_devinfo/sensor_devinfo.c" \
-            "$V/oplus/sensor/kernel/sensorhub/oplus_sensor_devinfo/sensor_devinfo.c" ; do
-            if [ -f "$SDI" ]; then
-              sed -i 's/^__attribute__((weak)) int register_lcdinfo_notifier() {/__attribute__((weak)) int register_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
-              sed -i 's/^__attribute__((weak)) int unregister_lcdinfo_notifier() {/__attribute__((weak)) int unregister_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
-              echo "  [ok]   $(basename $(dirname $SDI))"
-            fi
-          done
-
-          echo "===== C0. ★ 修复触摸屏 Kconfig 断链 ====="
-          # 根因（实测）：
-          #   vendor/.../oplus_touchscreen/Kconfig 只有 77 行，一条 source 都没有，
-          #   只剩空的 "if TOUCHPANEL_NOVA ... endif" 壳。OPPO 发布源码时把
-          #   子目录 source 行删了。于是各芯片 Kconfig 从未被读取，
-          #   那些 symbol 在 kconfig 眼里根本不存在 → 写进 config 也被丢弃
-          #   → 内核没有触摸驱动 → 能开机但屏幕点不动。
-          #
-          # 修法：不猜目录名（实际是 ilitek 小写、没有 Focaltech/Himax 目录），
-          #       直接全量 find 所有子 Kconfig，逐个 source 进去。
-          TPK="drivers/input/touchscreen/oplus_touchscreen/Kconfig"
-          if [ -f "$TPK" ]; then
-            B4=$(wc -l < "$TPK")
-            B4S=$(grep -c 'source' "$TPK" 2>/dev/null || echo 0)
-            echo "  修前: ${B4} 行, source ${B4S} 条"
-
-            # ★ oplus_touchscreen 是符号链接，find 默认不跟随 → 必须 -L
-            #   上一轮就是漏了这个，find 什么都没找到，77 行一行没加。
-            find -L drivers/input/touchscreen/oplus_touchscreen -name Kconfig -type f 2>/dev/null \
-              | grep -v "^${TPK}$" | sort > /tmp/tpk_list.txt
-            echo "  找到 $(wc -l < /tmp/tpk_list.txt) 个子 Kconfig:"
-            head -30 /tmp/tpk_list.txt
-
-            # 追加（幂等）
-            while read -r kf; do
-              [ -n "$kf" ] || continue
-              if ! grep -qF "source \"$kf\"" "$TPK" 2>/dev/null; then
-                printf 'source "%s"\n' "$kf" >> "$TPK"
-              fi
-            done < /tmp/tpk_list.txt
-
-            echo "  修后: $(wc -l < "$TPK") 行, source $(grep -c 'source' "$TPK" || echo 0) 条"
-            echo "  --- 追加的 source 行 ---"
-            grep 'source' "$TPK" | head -20
-
-            echo "  --- 关键 symbol 定义检查 ---"
-            for sym in TOUCHPANEL_NOVA_NT36672C_NOFLASH TOUCHPANEL_FOCAL_FT8006S_AA \
-                       TOUCHPANEL_HIMAX_HX83102D_NOFLASH TOUCHPANEL_ILITEK_ILITEK7807S \
-                       TOUCHPANEL_CHIPONE_ICNL9911C TOUCHPANEL_SYNAPTICS_TD4160; do
-              hit=$(grep -rl "config $sym" drivers/input/touchscreen/oplus_touchscreen/ 2>/dev/null | head -1)
-              if [ -n "$hit" ]; then
-                echo "    [ok]   $sym  <- $hit"
-              else
-                echo "    [MISS] $sym 仍然找不到"
-              fi
-            done
-            ok 0 "触摸屏 Kconfig source 链修复"
-          else
-            echo "  [FAIL] 缺 $TPK"; fail=1
-          fi
-
-          echo "  --- 修 Makefile（Kconfig 通了，但 Makefile 没接进编译）---"
-          # 第二个断点：drivers/input/touchscreen/Makefile 里没有
-          #   obj-$(CONFIG_TOUCHPANEL_OPLUS) += oplus_touchscreen/
-          # 所以即使 config 全对、Kconfig 全通，子目录也从来不参与编译，
-          # build.log 里只会有 touchpanel_common_driver.o 那 3 个公共文件。
-          TPM="drivers/input/touchscreen/Makefile"
-          if [ -f "$TPM" ]; then
-            if grep -q 'oplus_touchscreen' "$TPM"; then
-              echo "  [ok]   Makefile 已有 oplus_touchscreen"
-            else
-              printf '\n# OPLUS touchpanel（源码里被删掉了，补回）\nobj-$(CONFIG_TOUCHPANEL_OPLUS) += oplus_touchscreen/\n' >> "$TPM"
-              echo "  [ok]   已追加 obj-\$(CONFIG_TOUCHPANEL_OPLUS) += oplus_touchscreen/"
-            fi
-            tail -4 "$TPM"
-          else
-            echo "  [FAIL] 缺 $TPM"; fail=1
-          fi
-          echo "  --- 确认 OPLUS 总开关是 y ---"
-          grep -E '^CONFIG_TOUCHPANEL_OPLUS=' /tmp/allconfig || echo "  (ALLCONFIG 里没有，稍后 setkv 会加)"
-
-          echo "===== C. tp_devices.h 缺 TP_VXN 枚举 ====="
-          TP="$V/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"
-          if [ -f "$TP" ] && ! grep -q TP_VXN "$TP"; then
-            sed -i 's/^    TP_TXD,/    TP_TXD,\n    TP_VXN,/' "$TP"
-            ok $? "补 TP_VXN"
-          fi
-
-          echo "===== D. oplus_project 的 Kconfig/Makefile 挂载 ====="
-          SYSKC="drivers/soc/oplus/system/Kconfig"
-          if [ -f "$SYSKC" ]; then
-            ADDED=0
-            for sub in $(ls -d drivers/soc/oplus/system/*/ 2>/dev/null); do
-              name=$(basename "$sub")
-              [ -f "$sub/Kconfig" ] || continue
-              rel="drivers/soc/oplus/system/$name/Kconfig"
-              if ! grep -q "$rel" "$SYSKC"; then
-                printf 'source "%s"\n' "$rel" >> "$SYSKC"
-                ADDED=$((ADDED+1))
-              fi
-            done
-            echo "  [ok]   补 $ADDED 条 Kconfig source"
-          else
-            echo "  [FAIL] 缺 $SYSKC"; fail=1
-          fi
-          # 两个头文件名都链到 vendor 真头文件
-          rm -f include/soc/oplus/system/oppo_project.h
-          SRC_PJ="$V/oplus/kernel/boot/include/oplus_project.h"
-          [ -f "$SRC_PJ" ] || SRC_PJ="$V/oplus/kernel/system/include/oplus_project.h"
-          if [ -f "$SRC_PJ" ]; then
-            ln -sf "$SRC_PJ" include/soc/oplus/system/oplus_project.h
-            ln -sf "$SRC_PJ" include/soc/oplus/system/oppo_project.h
-            echo "  [ok]   oplus_project.h 已链接"
-          fi
-          [ -f include/scp.h ] || printf '%s\n' '#ifndef _SCP_FORWARD_H_' \
-            '#define _SCP_FORWARD_H_' \
-            '#include <../drivers/misc/mediatek/scp/include/scp.h>' \
-            '#endif' > include/scp.h
-
-          echo "===== E. is_key_process 缺失（vendor 里是 static）====="
+          echo "===== D. 其他 ====="
+          # is_key_process: 内核树 signal.c 调用它，但 vendor 里是 static（内部链接）
+          # stability_helper 是外部模块(KBUILD_OPTIONS=m)，不会进 vmlinux
+          # 最省事：在 oppo_process.h 里提供 static inline 实现（只用于打日志）
           PROC_H="include/soc/oplus/system/oppo_process.h"
-          rm -f "$PROC_H"
+          if [ -L "$PROC_H" ]; then rm -f "$PROC_H"; fi
           printf '%s\n' \
             '#ifndef _OPPO_PROCESS_H_' \
             '#define _OPPO_PROCESS_H_' \
@@ -273,409 +110,200 @@ jobs:
             '}' \
             'static inline bool oppo_is_android_core_group(struct pid *pgrp) { return false; }' \
             '#endif' > "$PROC_H"
-          ok $? "oppo_process.h 提供 is_key_process"
-
-          echo "===== F. sy6529 括号优先级（真语法问题）====="
+          ok $? "oppo_process.h 提供 static inline is_key_process"
+          grep -c 'is_key_process' "$PROC_H"
           SY="$V/oplus/kernel/charger/v1/voocphy/oplus_sy6529.c"
           [ -f "$SY" ] && {
             sed -i 's/if (\*data == sy6529_CHARGE_MODE_2_1 | \*data == sy6529_CHARGE_MODE_1_1)/if ((*data == sy6529_CHARGE_MODE_2_1) | (*data == sy6529_CHARGE_MODE_1_1))/' "$SY"
             ok $? "sy6529 括号"
           }
+          TP="$V/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"
+          if [ -f "$TP" ] && ! grep -q TP_VXN "$TP"; then
+            sed -i 's/^    TP_TXD,/    TP_TXD,\n    TP_VXN,/' "$TP"
+            ok $? "tp_devices.h 补 TP_VXN"
+          fi
 
-          echo "===== G. futex.c 里 vendor 未提供的 handler ====="
+          echo "===== E. 头部 + 编译挂载 ====="
+          mkdir -p include/soc/oplus/system
+          # oppo_process.h 已在 D 段生成（含 static inline is_key_process），此处不再覆盖
+          # --- 根因：drivers/soc/oplus/Makefile 是 0 字节空文件 ---
+          # drivers/soc/oplus/system -> vendor/oplus/kernel/system 链接已存在
+          # 但空 Makefile 导致 system/ 从不被递归，oplus_project 永远编不进去
+          SOCMK="drivers/soc/oplus/Makefile"
+          echo "  --- 修前 ---"; cat "$SOCMK" 2>/dev/null; echo "[EOF]"
+          # drivers/soc/Makefile 已有 obj-y += oplus/system/，此处无需再加 system/
+          # 保留原内容，只在缺失时补 healthinfo（原文件本来就该有）
+          if ! grep -q 'healthinfo/' "$SOCMK" 2>/dev/null; then
+            printf 'obj-y += healthinfo/\n' >> "$SOCMK"
+          fi
+          echo "  --- 修后 ---"; cat "$SOCMK"; echo "[EOF]"
+
+          # ★ 根因：system/Kconfig 没 source 子模块的 Kconfig
+          # 导致 CONFIG_OPLUS_FEATURE_OPROJECT / CONFIG_OPLUS_FEATURE_FEEDBACK
+          # 都是未声明 symbol，写进 .config 会被丢弃 → 对应 .o 不编译 → undefined reference
+          SYSKC="drivers/soc/oplus/system/Kconfig"
+          echo "  --- $SYSKC 修前 ---"; tail -3 "$SYSKC" 2>/dev/null; echo "[EOF]"
+          if [ -f "$SYSKC" ]; then
+            # 遍历 system/ 下所有子目录 Kconfig，缺谁补谁
+            ADDED=0
+            for sub in $(ls -d drivers/soc/oplus/system/*/ 2>/dev/null); do
+              name=$(basename "$sub")
+              [ -f "$sub/Kconfig" ] || continue
+              rel="drivers/soc/oplus/system/$name/Kconfig"
+              if ! grep -q "$rel" "$SYSKC"; then
+                printf 'source "%s"\n' "$rel" >> "$SYSKC"
+                echo "  [ok]   补 source $rel"
+                ADDED=$((ADDED+1))
+              fi
+            done
+            echo "  共补 $ADDED 条 source"
+            ok 0 "system/Kconfig 补齐子模块"
+          else
+            echo "  [FAIL] 缺 $SYSKC"; fail=1
+          fi
+          echo "  --- 修后（全部 source 行）---"
+          grep -n 'source' "$SYSKC" | head -40
+          # 关键 symbol 校验
+          for sym in OPLUS_FEATURE_OPROJECT OPLUS_FEATURE_FEEDBACK; do
+            if grep -rq "config $sym" drivers/soc/oplus/system/ 2>/dev/null; then
+              echo "  [ok]   $sym 已定义"
+            else
+              echo "  [FAIL] $sym 未定义"; fail=1
+            fi
+          done
+          test -d drivers/soc/oplus/system/oplus_project \
+            && echo "  [ok]   system/oplus_project 可访问" \
+            || { echo "  [FAIL] system/oplus_project 不存在"; fail=1; }
+          test -f drivers/soc/oplus/system/Makefile \
+            && echo "  [ok]   system/Makefile 存在（内含 OPROJECT 分支）" \
+            || { echo "  [FAIL] system/Makefile 缺失"; fail=1; }
+          # 两个头文件名字都链到 vendor 真头文件
+          rm -f include/soc/oplus/system/oppo_project.h
+          SRC_PJ="$V/oplus/kernel/boot/include/oplus_project.h"
+          [ -f "$SRC_PJ" ] || SRC_PJ="$V/oplus/kernel/system/include/oplus_project.h"
+          if [ -f "$SRC_PJ" ]; then
+            ln -sf "$SRC_PJ" include/soc/oplus/system/oplus_project.h
+            ln -sf "$SRC_PJ" include/soc/oplus/system/oppo_project.h
+            echo "  [ok]   两个名字链到 $(basename $(dirname $(dirname $SRC_PJ)))/include/oplus_project.h"
+          else
+            echo "  [FAIL] 找不到 vendor 的 oplus_project.h"; fail=1
+          fi
+          [ -f include/scp.h ] || printf '%s\n' '#ifndef _SCP_FORWARD_H_' \
+            '#define _SCP_FORWARD_H_' \
+            '#include <../drivers/misc/mediatek/scp/include/scp.h>' \
+            '#endif' > include/scp.h
+          ok $? "桩头文件处理"
+
+          echo "===== F. -Werror -> -Wno-error ====="
+          grep -rl -- "-Werror" --include=Makefile --include=Kbuild --include="*.mk" . 2>/dev/null | while read -r f; do
+            sed -i 's/-Werror=/-Wno-error=/g; s/-Werror-\([A-Za-z0-9_-]*\)/-Wno-error=\1/g; s/\(^\|[[:space:]]\)-Werror\([[:space:]]\|$\)/\1-Wno-error\2/g' "$f"
+          done
+          echo "  剩余 -Werror: $(grep -rn -- '-Werror' --include=Makefile . 2>/dev/null | wc -l)"
+
+          echo "===== G. config ====="
+          cp /tmp/stock.config out.config
+          # ★ 致命项：原厂 vermagic 是 "4.19.191+"（带一个加号）
+          # 这个 + 是 kbuild 检测到 git 树脏（有本地改动）时自动追加的
+          # 我们整个 patch 流程都在改源码，树一定是脏的 → 会自动得到 +
+          # 所以 CONFIG_LOCALVERSION 必须留空，绝不能手动写 "+"
+          #   LOCALVERSION="" + 脏树 → "4.19.191+"   正确
+          #   LOCALVERSION="+" + 脏树 → "4.19.191++" 错误（实测过，会变砖）
+          #   LOCALVERSION="" + 干净树 → "4.19.191"  错误（上次不开机的原因）
+          if grep -q '^CONFIG_LOCALVERSION=' out.config; then
+            sed -i 's|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=""|' out.config
+          else
+            printf 'CONFIG_LOCALVERSION=""\n' >> out.config
+          fi
+          grep -n '^CONFIG_LOCALVERSION' out.config
+          echo "  [ok]   LOCALVERSION 留空，由脏树自动追加 +"
+          # 保险：确认树确实是脏的（否则 + 不会出现）
+          if git -C . rev-parse --git-dir >/dev/null 2>&1; then
+            DIRTY=$(git -C . status --porcelain 2>/dev/null | head -1)
+            [ -n "$DIRTY" ] && echo "  [ok]   树是脏的，会得到 +" || echo "  [!!] 树是干净的，vermagic 会缺 +"
+          else
+            echo "  [note] 非 git 树，kbuild 会按 setlocalversion 规则处理"
+          fi
+          # Droidspaces 必需
+          # ★ 致命教训（2026-10-31 实测）：
+          #   CONFIG_SYSVIPC=y    → struct task_struct 多出 sysvsem / sysvshm 两个字段
+          #   CONFIG_POSIX_MQUEUE=y → 多出 mqueue_ctx（mqueue_ctx 也挂在 task_struct）
+          #   CONFIG_MODVERSIONS=y 时 module_layout 的 CRC 由结构体布局算出，
+          #   布局一变 CRC 就变 → 全部 vendor .ko 报
+          #       "disagrees about version of symbol module_layout" → Exec format error
+          #   实测后果：wlan/bt/gps/fm/fpsgo/met 共 10 个 ko 全部加载失败，WiFi 蓝牙 FM GPS 全废
+          #   结论：这两项必须保持原厂状态（原厂未开），否则手机开机但半残
+          printf '\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_TMPFS_XATTR=y\n' >> out.config
+          # OPPO 项目信息 + 反馈模块：原厂未开，导致 get_eng_version / oplus_kevent_fb_str 无定义
+          printf 'CONFIG_OPLUS_FEATURE_OPROJECT=y\nCONFIG_OPLUS_FEATURE_FEEDBACK=y\n' >> out.config
+          # 内核树 kernel/futex.c 调用 locking_vh_do_futex_handler，
+          # 但两套 vendor 代码（sched_assist/sync、synchronize）都不提供该符号
+          # （它们提供的是 locking_vh_do_futex / android_vh_do_futex_handler）
+          # → 直接把调用点用 #if 0 屏蔽，功能等价于未启用该优化
           FUTEX_C="kernel/futex.c"
           if [ -f "$FUTEX_C" ]; then
             cnt=$(grep -c 'locking_vh_.*_handler' "$FUTEX_C" 2>/dev/null || echo 0)
             echo "  发现 $cnt 处 locking_vh_*_handler 调用"
-            if [ "$cnt" -gt 0 ]; then
-              sed -i 's/^#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)$/#if 0 \/* vendor handlers not provided *\//' "$FUTEX_C"
-              echo "  已屏蔽（vendor 提供的是 android_vh_* / locking_vh_do_futex，名字对不上）"
-            fi
+            # 把所有 #if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY) 改成 #if 0
+            # 这些块里全是 vendor 未提供的 _handler 符号
+            sed -i 's/^#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)$/#if 0 \/* oplus locking strategy: vendor handlers not provided *\//' "$FUTEX_C"
+            left=$(grep -c 'IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)' "$FUTEX_C" 2>/dev/null || echo 0)
+            echo "  剩余 IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY): $left"
+            grep -n 'vendor handlers not provided' "$FUTEX_C" | head -12
+            ok 0 "futex.c 屏蔽 vendor 缺失的 handler 调用"
+          else
+            echo "  [note] $FUTEX_C 缺失"
           fi
 
-          echo "===== H. -Werror 全量降级（clang 下警告更多）====="
-          grep -rl -- "-Werror" --include=Makefile --include=Kbuild \
-               --include="*.mk" --include="*.mak" . 2>/dev/null | while read -r f; do
-            sed -i 's/-Werror=/-Wno-error=/g; s/-Werror-\([A-Za-z0-9_-]*\)/-Wno-error=\1/g; s/\(^\|[[:space:]]\)-Werror\([[:space:]]\|$\)/\1-Wno-error\2/g' "$f"
-          done
-          # vendor 侧也扫一遍
-          grep -rl -- "-Werror" --include=Makefile --include=Kbuild \
-               --include="*.mk" --include="*.mak" "$V" 2>/dev/null | while read -r f; do
-            sed -i 's/-Werror=/-Wno-error=/g; s/-Werror-\([A-Za-z0-9_-]*\)/-Wno-error=\1/g; s/\(^\|[[:space:]]\)-Werror\([[:space:]]\|$\)/\1-Wno-error\2/g' "$f"
-          done
-          echo "  剩余 -Werror(Makefile): $(grep -rn -- '-Werror' --include=Makefile . 2>/dev/null | wc -l)"
-          # subdir-ccflags 里也塞一份，覆盖所有子目录
-          if ! grep -q 'Wno-error=sizeof-pointer-memaccess' Makefile; then
-            printf '\n# clang 下大量历史代码触发的新警告，统一降级\nKBUILD_CFLAGS += -Wno-error=sizeof-pointer-memaccess -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=stringop-truncation -Wno-error=stringop-overflow -Wno-error=stringop-overread -Wno-error=array-bounds -Wno-error=address-of-packed-member -Wno-error=tautological-compare -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-function -Wno-error=unused-value -Wno-error=unused-label -Wno-error=missing-braces -Wno-error=parentheses -Wno-error=switch -Wno-error=misleading-indentation -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=declaration-after-statement -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=return-type -Wno-error=strict-prototypes -Wno-error=old-style-definition -Wno-error=missing-prototypes -Wno-error=deprecated-declarations -Wno-error=unused-result -Wno-error=builtin-declaration-mismatch -Wno-error=maybe-uninitialized -Wno-error=memset-elt-size\n' >> Makefile
-            echo "  [ok]   Makefile 追加 clang 警告降级"
+          # 同理，kernel/locking/mutex.c 调用 mutex_list_add，需要 sched_assist_mutex
+          # 这个在 sched_assist 目录但只在 CONFIG_OPLUS_LOCKING_STRATEGY 下编
+          # → 打开 LOCKING_STRATEGY（futex 那处已屏蔽，不会有符号问题）
+          if grep -q '^# CONFIG_OPLUS_LOCKING_STRATEGY is not set' out.config; then
+            sed -i 's/^# CONFIG_OPLUS_LOCKING_STRATEGY is not set/CONFIG_OPLUS_LOCKING_STRATEGY=y/' out.config
+          elif ! grep -q '^CONFIG_OPLUS_LOCKING_STRATEGY=' out.config; then
+            printf 'CONFIG_OPLUS_LOCKING_STRATEGY=y\n' >> out.config
           fi
-
-          echo "===== I. Droidspaces 官方 non-GKI 补丁 ====="
-          # 官方文档 Step3：Documentation/resources/kernel-patches/non-GKI 下的全部补丁
-          #   01 xt_qtaguid panic：容器读 /proc/net/xt_qtaguid 时碰到 down 的网卡
-          #      dev_get_stats 解空指针 → kernel panic
-          #   02 cgroup 前缀：Android 去掉了 subsys. 前缀，LXC 按标准路径找不到
-          PDIR=/tmp/dsp_patches
-          mkdir -p "$PDIR"
-          BASE="https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI"
-          curl -sL -o "$PDIR/01.patch" "$BASE/01.fix_kernel_panic_in_xt_qtaguid.patch" || true
-          curl -sL -o "$PDIR/02.patch" "$BASE/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch" || true
-          for pf in "$PDIR"/01.patch "$PDIR"/02.patch; do
-            if [ -s "$pf" ] && head -1 "$pf" | grep -q '^From '; then
-              echo "  --- 应用 $(basename $pf) ---"
-              if patch -p1 --forward --no-backup-if-mismatch < "$pf" > /tmp/patch.log 2>&1; then
-                echo "  [ok]   打上了"
-              else
-                # 可能已经打过，或者上下文略有差异
-                if grep -q 'Reversed (or previously applied)' /tmp/patch.log; then
-                  echo "  [ok]   之前已打过"
-                else
-                  echo "  [WARN] 没打上，日志:"
-                  head -12 /tmp/patch.log
-                fi
-              fi
-            else
-              echo "  [WARN] $pf 下载失败或不是合法 patch"
-            fi
-          done
-          echo "  验证 01 是否生效:"
-          grep -n 'stats = &no_dev_stats' net/netfilter/xt_qtaguid.c | head -3 || echo "    没找到"
-          echo "  验证 02 是否生效:"
-          grep -n 'CFTYPE_NO_PREFIX' kernel/cgroup/cgroup.c | head -3 || echo "    没找到"
+          echo "  [ok]   LOCKING_STRATEGY=y（提供 mutex_list_add）"
+          grep -E '^CONFIG_OPLUS_LOCKING_STRATEGY=' out.config || true
+          sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out.config
+          sed -i 's/^CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/' out.config
+          sed -i 's/^CONFIG_MODULE_SIG_ALL=y/# CONFIG_MODULE_SIG_ALL is not set/' out.config
+          grep -E "^CONFIG_(SYSVIPC|IPC_NS|USER_NS|CGROUP_PIDS|DEVTMPFS|POSIX_MQUEUE|OPLUS_FEATURE_OPROJECT)=" out.config || true
 
           [ "$fail" -eq 0 ] && echo "ALL PATCHES OK" || { echo "!! 有必改项失败"; exit 1; }
 
-      - name: Prepare config (olddefconfig + ALLCONFIG，一次产出一致 config)
+      - name: Build
         run: |
-          set -eu
-          export PATH="$HOME/clang/bin:$PATH"
-          export ARCH=arm64 SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
-          export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
-
+          export ARCH=arm64 SUBARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
           mkdir -p out
-
-          # 思路（推翻了前面几轮的手工回写）：
-          #   把要改的值直接改进 ALLCONFIG 文件，再让 kconfig 一次性产出 .config。
-          #   产出之后【绝不再手工 sed .config】。
-          #
-          # 为什么要推翻手工回写：
-          #   上一轮跑完 olddefconfig 后又 sed 了 35 行 .config，
-          #   导致 .config 与 Kconfig 树不一致。kbuild 生成
-          #   include/config/auto.conf.cmd 时会检测到不一致并重跑 syncconfig，
-          #   重跑要问 (NEW) 符号，CI 里 stdin 空 → 直接 Error 2 退出。
-          #   所以：要么一次产出正确，要么就别碰。
-          cp /tmp/stock.config /tmp/allconfig
-
-          setkv() {
-            sym="$1"; val="$2"
-            if grep -q "^${sym}=" /tmp/allconfig; then
-              sed -i "s|^${sym}=.*|${sym}=${val}|" /tmp/allconfig
-            elif grep -q "^# ${sym} is not set" /tmp/allconfig; then
-              sed -i "s|^# ${sym} is not set|${sym}=${val}|" /tmp/allconfig
-            else
-              printf '%s=%s\n' "$sym" "$val" >> /tmp/allconfig
-            fi
-          }
-          unsetkv() {
-            if grep -q "^$1=" /tmp/allconfig; then
-              sed -i "s|^$1=.*|# $1 is not set|" /tmp/allconfig
-            fi
-          }
-
-          echo "=== 改 ALLCONFIG（不是改 .config）==="
-          # vermagic 的 + 由脏树自动追加；写 "+" 会变 "4.19.191++"，实测会变砖
-          setkv CONFIG_LOCALVERSION '""'
-          # ===== Droidspaces 官方 Step1：必需项（照文档逐条搬） =====
-          # IPC
-          setkv CONFIG_SYSCTL y
-          setkv CONFIG_SYSVIPC y
-          setkv CONFIG_POSIX_MQUEUE y
-          # 核心 namespace
-          setkv CONFIG_NAMESPACES y
-          setkv CONFIG_PID_NS y
-          setkv CONFIG_UTS_NS y
-          setkv CONFIG_IPC_NS y
-          setkv CONFIG_NET_NS y
-          # seccomp
-          setkv CONFIG_SECCOMP y
-          setkv CONFIG_SECCOMP_FILTER y
-          # cgroup
-          setkv CONFIG_CGROUPS y
-          setkv CONFIG_CGROUP_DEVICE y
-          setkv CONFIG_CGROUP_SCHED y
-          setkv CONFIG_FAIR_GROUP_SCHED y
-          setkv CONFIG_CGROUP_FREEZER y
-          setkv CONFIG_CGROUP_NET_PRIO y
-          setkv CONFIG_MEMCG y
-          setkv CONFIG_MEMCG_SWAP y
-          setkv CONFIG_CFS_BANDWIDTH y
-          setkv CONFIG_CGROUP_PIDS y
-          setkv CONFIG_CGROUP_CPUACCT y
-          # devtmpfs / overlay / tmpfs
-          setkv CONFIG_DEVTMPFS y
-          setkv CONFIG_DEVTMPFS_MOUNT y
-          setkv CONFIG_OVERLAY_FS y
-          setkv CONFIG_TMPFS_POSIX_ACL y
-          setkv CONFIG_TMPFS_XATTR y
-          # firmware loader
-          setkv CONFIG_FW_LOADER y
-          setkv CONFIG_FW_LOADER_USER_HELPER y
-          setkv CONFIG_FW_LOADER_COMPRESS y
-          # 网络隔离 NAT 模式
-          setkv CONFIG_VETH y
-          setkv CONFIG_BRIDGE y
-          setkv CONFIG_NETFILTER y
-          setkv CONFIG_BRIDGE_NETFILTER y
-          setkv CONFIG_NETFILTER_ADVANCED y
-          setkv CONFIG_NF_CONNTRACK y
-          setkv CONFIG_IP_NF_IPTABLES y
-          setkv CONFIG_IP_NF_FILTER y
-          setkv CONFIG_NF_NAT y
-          setkv CONFIG_NF_TABLES y
-          setkv CONFIG_IP_NF_TARGET_MASQUERADE y
-          setkv CONFIG_NETFILTER_XT_TARGET_MASQUERADE y
-          setkv CONFIG_NETFILTER_XT_TARGET_TCPMSS y
-          setkv CONFIG_NETFILTER_XT_MATCH_ADDRTYPE y
-          setkv CONFIG_NF_CONNTRACK_NETLINK y
-          setkv CONFIG_NF_NAT_REDIRECT y
-          setkv CONFIG_IP_ADVANCED_ROUTER y
-          setkv CONFIG_IP_MULTIPLE_TABLES y
-          setkv CONFIG_MACVLAN y
-          # ★ 旧内核必须关掉，否则容器没网
-          # 这个 symbol 在原厂 config 里可能根本不存在，unsetkv 处理不了，所以直接写一行
-          unsetkv CONFIG_ANDROID_PARANOID_NETWORK
-          if ! grep -q '^CONFIG_ANDROID_PARANOID_NETWORK=' /tmp/allconfig && \
-             ! grep -q '^# CONFIG_ANDROID_PARANOID_NETWORK is not set' /tmp/allconfig; then
-            printf '# CONFIG_ANDROID_PARANOID_NETWORK is not set\n' >> /tmp/allconfig
-          fi
-          # docker unsafe procfs 修复
-          setkv CONFIG_USER_NS y
-          # 触摸屏总开关：Makefile 里 obj-$(CONFIG_TOUCHPANEL_OPLUS) 靠它
-          setkv CONFIG_TOUCHPANEL_OPLUS y
-          setkv CONFIG_TOUCHPANEL_MTK_PLATFORM y
-          setkv CONFIG_TOUCHPANEL_NOVA y
-          setkv CONFIG_TOUCHPANEL_NOVA_NT36672C_NOFLASH y
-          setkv CONFIG_TOUCHPANEL_NOVA_NT36525B_NOFLASH y
-          setkv CONFIG_TOUCHPANEL_ILITEK y
-          setkv CONFIG_TOUCHPANEL_ILITEK_ILITEK7807S y
-          setkv CONFIG_TOUCHPANEL_SYNAPTICS y
-          setkv CONFIG_TOUCHPANEL_SYNAPTICS_TD4160 y
-          setkv CONFIG_TOUCHPANEL_MULTI_NOFLASH y
-          setkv CONFIG_TOUCHPANEL_LATE_INIT y
-          setkv CONFIG_TOUCHPANEL_NT_PEN_SUPPORT y
-          setkv CONFIG_TOUCHPANEL_NT_DIGITALNOISE_TEST y
-          # f2fs 压缩：放弃。
-          # 已核实：fs/f2fs/compress.c 用的是旧版 Google zstd API
-          # (ZSTD_getParams / ZSTD_initCStream / ZSTD_decompressStream ...)
-          # 而 include/linux/zstd.h 提供的是上游新版 zstd_* API，
-          # 16 个调用一个都对不上 → 这棵树从来没编译过 compress.c。
-          # 原厂 config 里的 =y 是抄来的，实际没生效。开了必挂，所以不开。
-          setkv CONFIG_F2FS_FS_COMPRESSION n
-          # OPPO 模块
-          setkv CONFIG_OPLUS_FEATURE_OPROJECT y
-          setkv CONFIG_OPLUS_FEATURE_FEEDBACK y
-          # 无 OPPO 私钥
-          unsetkv CONFIG_MODULE_SIG
-          unsetkv CONFIG_MODULE_SIG_FORCE
-          unsetkv CONFIG_MODULE_SIG_ALL
-          echo "  ALLCONFIG $(wc -l < /tmp/allconfig) 行"
-
-          echo ""
-          echo "=== 诊断：ALLCONFIG 里的触摸项在不在 ==="
-          grep -cE '^CONFIG_TOUCHPANEL' /tmp/allconfig || true
-          grep -E '^CONFIG_TOUCHPANEL_NOVA_NT36672C_NOFLASH' /tmp/allconfig || echo "  !! ALLCONFIG 里没有这一行"
-
-          echo "=== 诊断：符号链接通不通 ==="
-          ls -la drivers/input/touchscreen/oplus_touchscreen 2>&1 | head -2
-          test -f drivers/input/touchscreen/oplus_touchscreen/Kconfig \
-            && echo "  [OK] 链接通的，Kconfig 可读" \
-            || echo "  [FAIL] 链接断了"
-
-          echo "=== 一次性产出 .config（alldefconfig + ALLCONFIG）==="
-          # ★★★ 为什么必须是 alldefconfig 而不是 olddefconfig：
-          #   scripts/kconfig/conf.c:605-611
-          #     case allyesconfig:
-          #     case allmodconfig:
-          #     case alldefconfig:
-          #     case randconfig:
-          #         name = getenv("KCONFIG_ALLCONFIG");
-          #   KCONFIG_ALLCONFIG 只对上面这 4 个目标生效。
-          #   olddefconfig 不在列表里 —— 传了也不读，等于白加。
-          #   这就是前几轮"SYSVIPC/DEVTMPFS/触摸驱动写进去却不生效"的根因。
-          #
-          # alldefconfig 语义：所有 symbol 取默认值，但 ALLCONFIG 文件里
-          # 明确指定的，一律以文件为准。我们的 ALLCONFIG 就是完整原厂 config，
-          # 所以结果 = 原厂 config + 我们的修改。
-          #
-          # ★ 编译器必须在 make 命令行上传，不能只靠 export：
-          #   顶层 Makefile 有 `CC = $(CROSS_COMPILE)gcc` 这类赋值会覆盖环境变量，
-          #   导致 kconfig 探测出 CC_IS_GCC=y，CFI/LTO 整条依赖链全塌。
-          #   命令行变量优先级最高。
-          rm -f out/.config
-          yes '' 2>/dev/null | make O=out ARCH=arm64 \
-            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
-            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
-            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
-            KCONFIG_ALLCONFIG=/tmp/allconfig alldefconfig > /tmp/cfg.log 2>&1
-          RC=$?
-          echo "  --- cfg.log 里 touchpanel 相关 ---"
-          grep -i 'touchpanel' /tmp/cfg.log | head -10 || echo "  (无)"
-          echo "  --- cfg.log 里的 warning/error ---"
-          grep -iE 'warning|error' /tmp/cfg.log | head -10 || echo "  (无)"
-          echo "  退出码 $RC"
-          tail -4 /tmp/cfg.log || true
-          if [ "$RC" -ne 0 ]; then
-            echo "  [note] olddefconfig 返回非 0（可能是 (NEW) 提问读到 EOF），继续但下面要核对"
-          fi
-
-          echo ""
-          echo "=== ★ alldefconfig 之后，.config 里的触摸项 ==="
-          echo "  计数: $(grep -cE '^CONFIG_TOUCHPANEL' out/.config 2>/dev/null || echo 0)"
-          grep -E 'TOUCHPANEL_(NOVA_NT36672C|FOCAL_FT8006S|HIMAX_HX83102D|ILITEK_ILITEK7807S)' out/.config 2>/dev/null | head -6 || echo "  关键 4 项都没了"
-
-          echo ""
-          echo "=== 产出结果（此后一行都不改）==="
-          echo "--- CFI / LTO / 编译器 ---"
-          for k in CC_IS_CLANG CC_IS_GCC CLANG_VERSION GCC_VERSION LD_IS_LLD \
-                   LTO LTO_CLANG LTO_NONE THINLTO \
-                   CFI CFI_CLANG CFI_CLANG_SHADOW; do
-            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
-          done
-
-          echo "--- f2fs ---"
-          for k in F2FS_FS F2FS_FS_COMPRESSION F2FS_FS_LZO F2FS_FS_LZ4 F2FS_FS_ZSTD; do
-            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
-          done
-
-          echo "--- f2fs 压缩 ---"
-          for k in F2FS_FS_COMPRESSION F2FS_FS_LZO F2FS_FS_LZ4 F2FS_FS_ZSTD LZ4HC_COMPRESS; do
-            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
-          done
-
-          echo "--- 触摸屏 ---"
-          for k in TOUCHPANEL_NOVA_NT36672C_NOFLASH TOUCHPANEL_FOCAL_FT8006S_AA \
-                   TOUCHPANEL_HIMAX_HX83102D_NOFLASH TOUCHPANEL_ILITEK_ILITEK7807S \
-                   TOUCHPANEL_CHIPONE_ICNL9911C; do
-            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
-          done
-
-          echo "--- 我们要的 ---"
-          for k in MODVERSIONS SYSVIPC IPC_NS USER_NS DEVTMPFS POSIX_MQUEUE \
-                   OPLUS_FEATURE_OPROJECT LOCALVERSION; do
-            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
-          done
-
-          echo ""
-          echo "=== 统计 ==="
-          echo "  =y:   $(grep -c '=y$' out/.config || true)"
-          echo "  总项: $(grep -cE '^CONFIG_|^# CONFIG_' out/.config || true)"
-          echo "  原厂: $(grep -cE '^CONFIG_|^# CONFIG_' /tmp/stock.config || true)"
-          echo "  md5:  $(md5sum out/.config)"
-          echo "  脏文件数: $(git status --porcelain 2>/dev/null | wc -l)"
-
-      - name: Build with clang + LTO + CFI
-        run: |
+          cp out.config out/.config
+          KCF="-I$PWD/drivers/misc/mediatek/scp/include -I$PWD/drivers/misc/mediatek/include -Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces -Wno-error=builtin-declaration-mismatch"
           set +e
-          export PATH="$HOME/clang/bin:$PATH"
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
-          export READELF=llvm-readelf
-
-          # ★ 关键：禁止 kbuild 在 make 期间静默更新 .config。
-          # 不加这个，make 会隐式跑 silentoldconfig，碰到 (NEW) symbol
-          # 就去读 stdin，CI 里 stdin 空 → 读失败 → 整份 config 按默认重算
-          # → f2fs 压缩、触摸驱动等 117 项丢失 → 刷了卡 logo / 没触摸。
-          export KCONFIG_NOSILENTUPDATE=1
-
-          echo "=== 工具链版本 ==="
-          clang --version | head -2
-          ld.lld --version
-
-          echo "=== 确认 .config 没被改（和 Prepare 阶段 md5 对上）==="
-          md5sum out/.config
-          grep -c '=y$' out/.config || true
-
-          # ★ 同样在命令行传编译器，别只靠 export
-          make O=out ARCH=arm64 -j$(nproc) \
-            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
-            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
-            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
-            Image.gz > /tmp/build.log 2>&1
+          make O=out ARCH=arm64 -j$(nproc) Image.gz KCFLAGS="$KCF" > /tmp/build.log 2>&1
           RC=$?
           set -e
-
           echo "=== BUILD EXIT: $RC ==="
-          echo "=== 是否又发生 config 重算 ==="
-          grep -c 'Restart config' /tmp/build.log && echo "  !! 又重算了" || echo "  [OK] 没有重算"
-          grep -c 'Error in reading or end of file' /tmp/build.log && echo "  !! 又有读 stdin 失败" || echo "  [OK] 没有 stdin 失败"
-
-          echo "=== error 行（最多 80）==="
-          grep -E "error:|fatal error:" /tmp/build.log | grep -v -E "TPD_INFO|printk|dev_info|dev_err" | head -80 || true
-          echo "=== 最后 30 行 ==="
-          tail -30 /tmp/build.log || true
-          echo "=== 产物 ==="
+          echo "=== error 行（最多 80） ==="
+          grep -E "error:|fatal error:" /tmp/build.log | head -80 || true
+          echo "=== 最后 25 行 ==="
+          tail -25 /tmp/build.log || true
+          echo "=== out/arch/arm64/boot ==="
           ls -la out/arch/arm64/boot/ 2>&1 | head -20 || true
 
-          echo "=== 编完后再验 config 关键项还在不在 ==="
-          for k in F2FS_FS_COMPRESSION CFI_CLANG LTO_CLANG THINLTO; do
-            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo 无)"
-          done
+          # ★ 门禁：vermagic 必须与原厂逐字一致，否则产出物会变砖
+          if [ "$RC" -eq 0 ] && [ -f out/arch/arm64/boot/Image ]; then
+            echo "=== VERMAGIC 门禁 ==="
+            VM=$(strings -a out/arch/arm64/boot/Image | grep -m1 'SMP.*mod_unload' || echo "")
+            echo "  实际: [$VM]"
+            echo "  期望: [4.19.191+ SMP preempt mod_unload modversions aarch64]"
+            if [ "$VM" = "4.19.191+ SMP preempt mod_unload modversions aarch64" ]; then
+              echo "  [PASS] vermagic 与原厂一致"
+            else
+              echo "  [FAIL] vermagic 不符 —— 这份镜像刷了会变砖，中止"
+              exit 1
+            fi
+          fi
 
           if [ "$RC" -ne 0 ]; then exit 1; fi
-
-      - name: Gate - vermagic / CFI / LTO
-        if: success()
-        run: |
-          set +e
-          IMG=out/arch/arm64/boot/Image
-          [ -f "$IMG" ] || { echo "!! 没有 Image"; exit 1; }
-
-          echo "=== 门禁 1: vermagic ==="
-          VM=$(strings -a "$IMG" | grep -m1 'SMP.*mod_unload' || echo "")
-          echo "  实际: [$VM]"
-          echo "  期望: [4.19.191+ SMP preempt mod_unload modversions aarch64]"
-          if [ "$VM" != "4.19.191+ SMP preempt mod_unload modversions aarch64" ]; then
-            echo "  [FAIL] vermagic 不符 → 会变砖"
-            exit 1
-          fi
-          echo "  [PASS]"
-
-          echo "=== 门禁 2: CFI 是否真的启用 ==="
-          CFI_CNT=$(strings -a "$IMG" | grep -c '^__cfi_' || echo 0)
-          echo "  __cfi_ 符号数: $CFI_CNT"
-          if [ "$CFI_CNT" -lt 100 ]; then
-            echo "  [WARN] CFI 符号偏少，可能没真正启用"
-          else
-            echo "  [PASS] CFI 已启用"
-          fi
-
-          echo "=== 门禁 3: 内核大小与原厂同量级 ==="
-          SZ=$(stat -c%s "$IMG")
-          echo "  Image 大小: $SZ  (原厂 47,462,400)"
-          if [ "$SZ" -lt 30000000 ] || [ "$SZ" -gt 80000000 ]; then
-            echo "  [WARN] 大小异常"
-          else
-            echo "  [PASS]"
-          fi
-
-          echo "=== 门禁 4: config 关键项 ==="
-          for k in CONFIG_LTO_CLANG CONFIG_CFI_CLANG CONFIG_MODVERSIONS CONFIG_OPLUS_FEATURE_OPROJECT; do
-            if grep -q "^$k=y" out/.config; then echo "  [OK]   $k=y"; else echo "  [WARN] $k 非 y"; fi
-          done
-
-          echo "ALL GATES DONE"
 
       - name: Package
         if: always()
@@ -686,13 +314,22 @@ jobs:
             cp Image.gz "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"; echo "used Image.gz"
           elif [ -f Image ]; then
             gzip -9 -c Image > "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"; echo "gzipped Image"
+            cp Image "$GITHUB_WORKSPACE/artifacts/kernel_Image.raw"
+          else
+            echo "!! 无内核镜像"
           fi
-          [ -f Image ] && cp Image "$GITHUB_WORKSPACE/artifacts/kernel_Image.raw"
-          [ -f System.map ] && cp System.map "$GITHUB_WORKSPACE/artifacts/kernel.System.map"
-          [ -f "$GITHUB_WORKSPACE/out/.config" ] && cp "$GITHUB_WORKSPACE/out/.config" "$GITHUB_WORKSPACE/artifacts/kernel.config"
-          [ -f vmlinux ] && cp vmlinux "$GITHUB_WORKSPACE/artifacts/vmlinux" || true
-          cp /tmp/build.log "$GITHUB_WORKSPACE/artifacts/build.log" 2>/dev/null || true
           ls -la "$GITHUB_WORKSPACE/artifacts/" || true
+          cp "$GITHUB_WORKSPACE/out/.config" "$GITHUB_WORKSPACE/artifacts/kernel.config" 2>/dev/null || true
+          cp System.map "$GITHUB_WORKSPACE/artifacts/kernel.System.map" 2>/dev/null || true
+          cp /tmp/build.log "$GITHUB_WORKSPACE/artifacts/build.log" 2>/dev/null || true
+          # ★ 把 module_layout 的 CRC 带出来 —— 这是 vendor .ko 能否加载的唯一判据
+          # 原厂 ko 的 __versions 段里存着它期望的 CRC；内核 CRC 不一致就报
+          # "disagrees about version of symbol module_layout" → Exec format error
+          cp "$GITHUB_WORKSPACE/out/Module.symvers" "$GITHUB_WORKSPACE/artifacts/Module.symvers" 2>/dev/null || true
+          echo "=== module_layout CRC (关键校验值) ==="
+          grep -iE '\bmodule_layout\b' "$GITHUB_WORKSPACE/out/Module.symvers" 2>/dev/null || echo "(Module.symvers 里没找到 module_layout)"
+          echo "=== 全部导出符号数 ==="
+          wc -l "$GITHUB_WORKSPACE/out/Module.symvers" 2>/dev/null || true
 
       - name: Upload
         if: always()

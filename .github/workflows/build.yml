@@ -39,7 +39,45 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq make libncurses-dev flex bison libssl-dev bc \
-                                    gcc-aarch64-linux-gnu cpio
+                                    cpio lld llvm
+          # ★★★ 必须用 clang 11.0.1，和原厂完全一致 ★★★
+          #
+          # 为什么不能用 GCC：
+          #   原厂 config: CONFIG_CC_IS_CLANG=y / CONFIG_CFI_CLANG=y / CONFIG_LTO_CLANG=y
+          #   struct module 里有：
+          #       #ifdef CONFIG_CFI_CLANG
+          #           cfi_check_fn cfi_check;
+          #       #endif
+          #   GCC 不支持 CFI，这个字段消失 → struct module 布局变 → CRC 变
+          #
+          #   实测：GCC 编出来 module_layout CRC = 0xa11ea8b9
+          #         设备 10 个 vendor .ko 期望   = 0xddfea5da
+          #         不一致 → "disagrees about version of symbol module_layout"
+          #         → WiFi / 蓝牙 / GPS / FM / fpsgo 全部加载失败
+          #
+          #   CC_IS_CLANG 是 kbuild 探测编译器得出的，写进 config 没用，必须真的换编译器
+          #
+          # AOSP clang-r383902 = clang 11.0.1，正是原厂 CONFIG_CLANG_VERSION=110001
+          set -e
+          CLANG_DIR="$HOME/clang-r383902"
+          rm -rf "$CLANG_DIR"
+          echo "  获取 clang 11.0.1 (r383902)..."
+          # 优先 git shallow clone（archive 对大仓库容易超时）
+          if git clone --depth 1 --branch lineage-20 \
+               https://github.com/Jacksonzwang/android_prebuilts_clang_kernel_linux-x86_clang-r383902.git \
+               "$CLANG_DIR" 2>&1 | tail -3; then
+            echo "  [ok] clone 完成"
+          else
+            echo "  [!!] clone 失败，试 tarball"
+            mkdir -p "$CLANG_DIR"
+            curl -sL --max-time 600 -o /tmp/clang.tar.gz \
+              "https://github.com/Jacksonzwang/android_prebuilts_clang_kernel_linux-x86_clang-r383902/archive/refs/heads/lineage-20.tar.gz"
+            tar xzf /tmp/clang.tar.gz -C "$CLANG_DIR" --strip-components=1
+          fi
+          ls "$CLANG_DIR/bin/clang" || { echo "!! 找不到 bin/clang"; exit 1; }
+          "$CLANG_DIR/bin/clang" --version || { echo "!! clang 跑不起来"; exit 1; }
+          echo "CLANG_DIR=$CLANG_DIR" >> "$GITHUB_ENV"
+          echo "  [ok] clang 就位: $CLANG_DIR"
 
       - name: Patch OPPO source defects
         run: |
@@ -224,15 +262,16 @@ jobs:
             echo "  [note] 非 git 树，kbuild 会按 setlocalversion 规则处理"
           fi
           # Droidspaces 必需
-          # ★ 致命教训（2026-10-31 实测）：
-          #   CONFIG_SYSVIPC=y    → struct task_struct 多出 sysvsem / sysvshm 两个字段
-          #   CONFIG_POSIX_MQUEUE=y → 多出 mqueue_ctx（mqueue_ctx 也挂在 task_struct）
-          #   CONFIG_MODVERSIONS=y 时 module_layout 的 CRC 由结构体布局算出，
-          #   布局一变 CRC 就变 → 全部 vendor .ko 报
-          #       "disagrees about version of symbol module_layout" → Exec format error
-          #   实测后果：wlan/bt/gps/fm/fpsgo/met 共 10 个 ko 全部加载失败，WiFi 蓝牙 FM GPS 全废
-          #   结论：这两项必须保持原厂状态（原厂未开），否则手机开机但半残
-          printf '\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_TMPFS_XATTR=y\n' >> out.config
+          # ★ 二次排查结论（2026-10-31）：
+          #   CONFIG_SYSVIPC / POSIX_MQUEUE 会给 task_struct 加字段，
+          #   但 module_layout 的 CRC 只对 struct module 计算，与 task_struct 无关。
+          #   → 这两项掉 ko 的锅是无辜的，可以放心开。
+          #   （真正元凶是 CONFIG_MODULE_SIG，见下方说明）
+          #
+          #   MODVERSIONS 的其它符号 CRC 确实会受结构体布局影响，
+          #   但 vendor ko 只依赖少数几个（实测导入符号里没有 task_struct 相关），
+          #   所以 SYSVIPC 安全。
+          printf '\nCONFIG_SYSVIPC=y\nCONFIG_SYSVIPC_SYSCTL=y\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_POSIX_MQUEUE=y\nCONFIG_TMPFS_XATTR=y\n' >> out.config
           # OPPO 项目信息 + 反馈模块：原厂未开，导致 get_eng_version / oplus_kevent_fb_str 无定义
           printf 'CONFIG_OPLUS_FEATURE_OPROJECT=y\nCONFIG_OPLUS_FEATURE_FEEDBACK=y\n' >> out.config
           # 内核树 kernel/futex.c 调用 locking_vh_do_futex_handler，
@@ -264,21 +303,62 @@ jobs:
           fi
           echo "  [ok]   LOCKING_STRATEGY=y（提供 mutex_list_add）"
           grep -E '^CONFIG_OPLUS_LOCKING_STRATEGY=' out.config || true
-          sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out.config
+          # ★★★ 关键修正（2026-10-31 二次排查）：module_layout CRC 的真正元凶 ★★★
+          #
+          # 症状：10 个 vendor .ko 全部报
+          #       "disagrees about version of symbol module_layout" → Exec format error
+          #       → WiFi / 蓝牙 / GPS / FM / fpsgo 全废
+          #
+          # 我一开始归因于 CONFIG_SYSVIPC（task_struct 加字段），那是错的。
+          # scripts/mod/modpost.c 里 module_layout 的 CRC 只对 【struct module】 计算，
+          # 与 task_struct 无关。而 struct module 里有：
+          #
+          #     #ifdef CONFIG_MODULE_SIG
+          #         bool sig_ok;
+          #     #endif
+          #
+          # 关掉 MODULE_SIG → sig_ok 字段消失 → struct module 变小 → CRC 变
+          # 实测设备 10 个 ko 期望的 CRC 统一是 0xddfea5da（原厂内核算出）
+          #
+          # 正确做法：MODULE_SIG 必须保持 =y（保住 struct module 布局）
+          #           只关 MODULE_SIG_FORCE（不强制校验签名，否则 vendor ko 因无签名被拒）
+          #           * 注意：SIG_ALL 也关（否则每次编译要现场生成签名密钥，浪费时间）
+          sed -i 's/^# CONFIG_MODULE_SIG is not set/CONFIG_MODULE_SIG=y/' out.config
+          if ! grep -q '^CONFIG_MODULE_SIG=' out.config; then
+            printf 'CONFIG_MODULE_SIG=y\n' >> out.config
+          fi
           sed -i 's/^CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/' out.config
           sed -i 's/^CONFIG_MODULE_SIG_ALL=y/# CONFIG_MODULE_SIG_ALL is not set/' out.config
+          echo "  [关键] MODULE_SIG=y（保住 struct module 布局 → module_layout CRC 不变）"
+          echo "  [关键] MODULE_SIG_FORCE=n（不强制校验 → vendor ko 能加载）"
+          grep -E '^CONFIG_MODULE_SIG' out.config || true
           grep -E "^CONFIG_(SYSVIPC|IPC_NS|USER_NS|CGROUP_PIDS|DEVTMPFS|POSIX_MQUEUE|OPLUS_FEATURE_OPROJECT)=" out.config || true
 
           [ "$fail" -eq 0 ] && echo "ALL PATCHES OK" || { echo "!! 有必改项失败"; exit 1; }
 
       - name: Build
         run: |
-          export ARCH=arm64 SUBARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+          # ★ 用 clang 11.0.1 + LLD，和原厂工具链一致
+          export PATH="$CLANG_DIR/bin:$PATH"
+          export ARCH=arm64 SUBARCH=arm64
+          export LLVM=1
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          export CC=clang
+          unset CROSS_COMPILE
+          clang --version | head -2
+          ld.lld --version | head -1
           mkdir -p out
           cp out.config out/.config
           KCF="-I$PWD/drivers/misc/mediatek/scp/include -I$PWD/drivers/misc/mediatek/include -Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces -Wno-error=builtin-declaration-mismatch"
           set +e
-          make O=out ARCH=arm64 -j$(nproc) Image.gz KCFLAGS="$KCF" > /tmp/build.log 2>&1
+          make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+               LLVM=1 LLVM_IAS=1 \
+               -j$(nproc) Image.gz KCFLAGS="$KCF" > /tmp/build.log 2>&1
           RC=$?
           set -e
           echo "=== BUILD EXIT: $RC ==="

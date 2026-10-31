@@ -143,6 +143,57 @@ jobs:
             fi
           done
 
+          echo "===== C0. ★ 修复触摸屏 Kconfig 断链 ====="
+          # 根因（实测）：
+          #   vendor/.../oplus_touchscreen/Kconfig 只有 77 行，一条 source 都没有，
+          #   只剩空的 "if TOUCHPANEL_NOVA ... endif" 壳。OPPO 发布源码时把
+          #   子目录 source 行删了。于是各芯片 Kconfig 从未被读取，
+          #   那些 symbol 在 kconfig 眼里根本不存在 → 写进 config 也被丢弃
+          #   → 内核没有触摸驱动 → 能开机但屏幕点不动。
+          #
+          # 修法：不猜目录名（实际是 ilitek 小写、没有 Focaltech/Himax 目录），
+          #       直接全量 find 所有子 Kconfig，逐个 source 进去。
+          TPK="drivers/input/touchscreen/oplus_touchscreen/Kconfig"
+          if [ -f "$TPK" ]; then
+            B4=$(wc -l < "$TPK")
+            B4S=$(grep -c 'source' "$TPK" 2>/dev/null || echo 0)
+            echo "  修前: ${B4} 行, source ${B4S} 条"
+
+            # 先列一遍要加的
+            echo "  待 source 的文件:"
+            find drivers/input/touchscreen/oplus_touchscreen -name Kconfig -type f 2>/dev/null \
+              | grep -v "^${TPK}$" | sort | while read -r kf; do
+                echo "    $kf"
+              done
+
+            # 追加（带幂等检查）
+            find drivers/input/touchscreen/oplus_touchscreen -name Kconfig -type f 2>/dev/null \
+              | grep -v "^${TPK}$" | sort | while read -r kf; do
+                if ! grep -qF "source \"$kf\"" "$TPK" 2>/dev/null; then
+                  printf 'source "%s"\n' "$kf" >> "$TPK"
+                fi
+              done
+
+            echo "  修后: $(wc -l < "$TPK") 行, source $(grep -c 'source' "$TPK" || echo 0) 条"
+            echo "  --- 追加的 source 行 ---"
+            grep 'source' "$TPK" | head -20
+
+            echo "  --- 关键 symbol 定义检查 ---"
+            for sym in TOUCHPANEL_NOVA_NT36672C_NOFLASH TOUCHPANEL_FOCAL_FT8006S_AA \
+                       TOUCHPANEL_HIMAX_HX83102D_NOFLASH TOUCHPANEL_ILITEK_ILITEK7807S \
+                       TOUCHPANEL_CHIPONE_ICNL9911C TOUCHPANEL_SYNAPTICS_TD4160; do
+              hit=$(grep -rl "config $sym" drivers/input/touchscreen/oplus_touchscreen/ 2>/dev/null | head -1)
+              if [ -n "$hit" ]; then
+                echo "    [ok]   $sym  <- $hit"
+              else
+                echo "    [MISS] $sym 仍然找不到"
+              fi
+            done
+            ok 0 "触摸屏 Kconfig source 链修复"
+          else
+            echo "  [FAIL] 缺 $TPK"; fail=1
+          fi
+
           echo "===== C. tp_devices.h 缺 TP_VXN 枚举 ====="
           TP="$V/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"
           if [ -f "$TP" ] && ! grep -q TP_VXN "$TP"; then

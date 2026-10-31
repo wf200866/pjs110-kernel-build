@@ -194,6 +194,26 @@ jobs:
             echo "  [FAIL] 缺 $TPK"; fail=1
           fi
 
+          echo "  --- 修 Makefile（Kconfig 通了，但 Makefile 没接进编译）---"
+          # 第二个断点：drivers/input/touchscreen/Makefile 里没有
+          #   obj-$(CONFIG_TOUCHPANEL_OPLUS) += oplus_touchscreen/
+          # 所以即使 config 全对、Kconfig 全通，子目录也从来不参与编译，
+          # build.log 里只会有 touchpanel_common_driver.o 那 3 个公共文件。
+          TPM="drivers/input/touchscreen/Makefile"
+          if [ -f "$TPM" ]; then
+            if grep -q 'oplus_touchscreen' "$TPM"; then
+              echo "  [ok]   Makefile 已有 oplus_touchscreen"
+            else
+              printf '\n# OPLUS touchpanel（源码里被删掉了，补回）\nobj-$(CONFIG_TOUCHPANEL_OPLUS) += oplus_touchscreen/\n' >> "$TPM"
+              echo "  [ok]   已追加 obj-\$(CONFIG_TOUCHPANEL_OPLUS) += oplus_touchscreen/"
+            fi
+            tail -4 "$TPM"
+          else
+            echo "  [FAIL] 缺 $TPM"; fail=1
+          fi
+          echo "  --- 确认 OPLUS 总开关是 y ---"
+          grep -E '^CONFIG_TOUCHPANEL_OPLUS=' /tmp/allconfig || echo "  (ALLCONFIG 里没有，稍后 setkv 会加)"
+
           echo "===== C. tp_devices.h 缺 TP_VXN 枚举 ====="
           TP="$V/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"
           if [ -f "$TP" ] && ! grep -q TP_VXN "$TP"; then
@@ -433,6 +453,20 @@ jobs:
           fi
           # docker unsafe procfs 修复
           setkv CONFIG_USER_NS y
+          # 触摸屏总开关：Makefile 里 obj-$(CONFIG_TOUCHPANEL_OPLUS) 靠它
+          setkv CONFIG_TOUCHPANEL_OPLUS y
+          setkv CONFIG_TOUCHPANEL_MTK_PLATFORM y
+          setkv CONFIG_TOUCHPANEL_NOVA y
+          setkv CONFIG_TOUCHPANEL_NOVA_NT36672C_NOFLASH y
+          setkv CONFIG_TOUCHPANEL_NOVA_NT36525B_NOFLASH y
+          setkv CONFIG_TOUCHPANEL_ILITEK y
+          setkv CONFIG_TOUCHPANEL_ILITEK_ILITEK7807S y
+          setkv CONFIG_TOUCHPANEL_SYNAPTICS y
+          setkv CONFIG_TOUCHPANEL_SYNAPTICS_TD4160 y
+          setkv CONFIG_TOUCHPANEL_MULTI_NOFLASH y
+          setkv CONFIG_TOUCHPANEL_LATE_INIT y
+          setkv CONFIG_TOUCHPANEL_NT_PEN_SUPPORT y
+          setkv CONFIG_TOUCHPANEL_NT_DIGITALNOISE_TEST y
           # OPPO 模块
           setkv CONFIG_OPLUS_FEATURE_OPROJECT y
           setkv CONFIG_OPLUS_FEATURE_FEEDBACK y

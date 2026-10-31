@@ -159,20 +159,20 @@ jobs:
             B4S=$(grep -c 'source' "$TPK" 2>/dev/null || echo 0)
             echo "  修前: ${B4} 行, source ${B4S} 条"
 
-            # 先列一遍要加的
-            echo "  待 source 的文件:"
-            find drivers/input/touchscreen/oplus_touchscreen -name Kconfig -type f 2>/dev/null \
-              | grep -v "^${TPK}$" | sort | while read -r kf; do
-                echo "    $kf"
-              done
+            # ★ oplus_touchscreen 是符号链接，find 默认不跟随 → 必须 -L
+            #   上一轮就是漏了这个，find 什么都没找到，77 行一行没加。
+            find -L drivers/input/touchscreen/oplus_touchscreen -name Kconfig -type f 2>/dev/null \
+              | grep -v "^${TPK}$" | sort > /tmp/tpk_list.txt
+            echo "  找到 $(wc -l < /tmp/tpk_list.txt) 个子 Kconfig:"
+            head -30 /tmp/tpk_list.txt
 
-            # 追加（带幂等检查）
-            find drivers/input/touchscreen/oplus_touchscreen -name Kconfig -type f 2>/dev/null \
-              | grep -v "^${TPK}$" | sort | while read -r kf; do
-                if ! grep -qF "source \"$kf\"" "$TPK" 2>/dev/null; then
-                  printf 'source "%s"\n' "$kf" >> "$TPK"
-                fi
-              done
+            # 追加（幂等）
+            while read -r kf; do
+              [ -n "$kf" ] || continue
+              if ! grep -qF "source \"$kf\"" "$TPK" 2>/dev/null; then
+                printf 'source "%s"\n' "$kf" >> "$TPK"
+              fi
+            done < /tmp/tpk_list.txt
 
             echo "  修后: $(wc -l < "$TPK") 行, source $(grep -c 'source' "$TPK" || echo 0) 条"
             echo "  --- 追加的 source 行 ---"

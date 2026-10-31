@@ -6,6 +6,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       EXP_PURE_STOCK: "1"
+      EXP_NO_TREE_INLINE: "1"
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
@@ -90,21 +91,32 @@ jobs:
           sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
           ok $? "去掉 cpu_jankinfo 引用"
 
-          echo "===== B. core 头文件 inline 声明 ====="
-          sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h 2>/dev/null || true
-          sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h 2>/dev/null || true
-          sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h 2>/dev/null || true
-          sed -i 's/^inline void blk_crypto_flock/extern void blk_crypto_flock/' include/linux/blk-crypto.h 2>/dev/null || true
+          echo "===== B. core 头文件 inline 声明（可跳过） ====="
+          if [ "${EXP_NO_TREE_INLINE:-0}" = "1" ]; then
+            echo "  ★★ 跳过：不改内核核心头文件 ★★"
+          else
+            sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h 2>/dev/null || true
+            sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h 2>/dev/null || true
+            sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h 2>/dev/null || true
+            sed -i 's/^inline void blk_crypto_flock/extern void blk_crypto_flock/' include/linux/blk-crypto.h 2>/dev/null || true
+          fi
 
-          echo "===== C0. 通用 inline 降级（全树 + vendor） ====="
+          echo "===== C0. 通用 inline 降级（仅 vendor） ====="
           echo 'aW1wb3J0IHJlLCBvcywgc3lzCgojIOmAmueUqCBpbmxpbmUg6ZmN57qn5ZmoCiMg6Kej5YazIGdudTg5L0M5OSBpbmxpbmUg6K+t5LmJ5re355So5a+86Ie055qE77yaCiMgICAiaW5saW5pbmcgZmFpbGVkIGluIGNhbGwgdG8gJ2Fsd2F5c19pbmxpbmUnIFhYWDogZnVuY3Rpb24gYm9keSBub3QgYXZhaWxhYmxlIgojCiMg6KeE5YiZ77yI5L+d5a6I77yM5LuF5Lik57G777yJ77yaCiMgICAxKSDlpLTmlofku7bnuq/lo7DmmI7vvJogIFtleHRlcm5dIGlubGluZSBUWVBFIGZuKGFyZ3MpOyAgLT4gIGV4dGVybiBUWVBFIGZuKGFyZ3MpOwojICAgMikgLmMg5paH5Lu25a6a5LmJ77yaICAgaW5saW5lIFRZUEUgZm4oYXJncykgeyAgICAgICAgIC0+ICBUWVBFIGZuKGFyZ3MpIHsKIyDkuI3liqjvvJoKIyAgIC0gc3RhdGljIGlubGluZe+8iOWktOaWh+S7tuecnyBpbmxpbmXvvIzlronlhajvvIkKIyAgIC0g5aS05paH5Lu26YeM5bim5Ye95pWw5L2T55qEIGlubGluZe+8iOaUueS6huS8mumHjeWkjeWumuS5ie+8iQojICAgLSDlkKsgX19hdHRyaWJ1dGVfXyDnmoTooYwKCkRFQ0wgPSByZS5jb21waWxlKHInXihccyopKD86ZXh0ZXJuXHMrKT9pbmxpbmVccysoW0EtWmEtel9dW1x3IFx0XCpdKj8pXGIoXHcrKVxzKlwoKFteO10qKVwpXHMqO1xzKiQnKQpERUYgPSByZS5jb21waWxlKHInXihccyopaW5saW5lXHMrKFtBLVphLXpfXVtcdyBcdFwqXSo/KVxiKFx3KylccypcKChbXildKilcKVxzKihceyk/XHMqJCcpClNLSVAgPSB7J21haW4nfQoKCmRlZiBwcm9jZXNzKHBhdGgsIGlzX2hlYWRlcik6CiAgICB0cnk6CiAgICAgICAgbGluZXMgPSBvcGVuKHBhdGgsIGVuY29kaW5nPSd1dGYtOCcsIGVycm9ycz0nc3Vycm9nYXRlZXNjYXBlJykucmVhZGxpbmVzKCkKICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgcmV0dXJuIDAKICAgIGNoYW5nZWQsIG91dCA9IDAsIFtdCiAgICBmb3IgbG4gaW4gbGluZXM6CiAgICAgICAgcyA9IGxuLmxzdHJpcCgpCiAgICAgICAgaWYgcy5zdGFydHN3aXRoKCdzdGF0aWMgJykgb3IgJ3N0YXRpYyBpbmxpbmUnIGluIGxuOgogICAgICAgICAgICBvdXQuYXBwZW5kKGxuKQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGlmIHJlLm1hdGNoKHInXlxzKiMnLCBsbikgb3IgJ19fYXR0cmlidXRlX18nIGluIGxuOgogICAgICAgICAgICBvdXQuYXBwZW5kKGxuKQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIG0gPSBERUNMLm1hdGNoKGxuKQogICAgICAgIGlmIG0gYW5kIGlzX2hlYWRlcjoKICAgICAgICAgICAgaW5kLCB0eXAsIG5hbWUsIGFyZ3MgPSBtLmdyb3VwcygpCiAgICAgICAgICAgIGlmIG5hbWUgaW4gU0tJUDoKICAgICAgICAgICAgICAgIG91dC5hcHBlbmQobG4pCiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICBuZXdsaW5lID0gaW5kICsgJ2V4dGVybiAnICsgdHlwLnN0cmlwKCkgKyAnICcgKyBuYW1lICsgJygnICsgYXJncyArICcpOycgKyAnXG4nCiAgICAgICAgICAgIG91dC5hcHBlbmQobmV3bGluZSkKICAgICAgICAgICAgY2hhbmdlZCArPSAxCiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgbSA9IERFRi5tYXRjaChsbikKICAgICAgICBpZiBtIGFuZCBub3QgaXNfaGVhZGVyOgogICAgICAgICAgICBpbmQsIHR5cCwgbmFtZSwgYXJncywgYnIgPSBtLmdyb3VwcygpCiAgICAgICAgICAgIGlmIG5hbWUgaW4gU0tJUDoKICAgICAgICAgICAgICAgIG91dC5hcHBlbmQobG4pCiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICBuZXdsaW5lID0gaW5kICsgdHlwLnN0cmlwKCkgKyAnICcgKyBuYW1lICsgJygnICsgYXJncyArICcpJwogICAgICAgICAgICBpZiBicjoKICAgICAgICAgICAgICAgIG5ld2xpbmUgKz0gJyB7JwogICAgICAgICAgICBuZXdsaW5lICs9ICdcbicKICAgICAgICAgICAgb3V0LmFwcGVuZChuZXdsaW5lKQogICAgICAgICAgICBjaGFuZ2VkICs9IDEKICAgICAgICAgICAgY29udGludWUKICAgICAgICBvdXQuYXBwZW5kKGxuKQogICAgaWYgY2hhbmdlZDoKICAgICAgICBvcGVuKHBhdGgsICd3JywgZW5jb2Rpbmc9J3V0Zi04JywgZXJyb3JzPSdzdXJyb2dhdGVlc2NhcGUnKS53cml0ZWxpbmVzKG91dCkKICAgIHJldHVybiBjaGFuZ2VkCgoKZGVmIHdhbGsocm9vdHMpOgogICAgdG90LCBmaWxlcyA9IDAsIDAKICAgIGZvciByb290IGluIHJvb3RzOgogICAgICAgIGlmIG5vdCBvcy5wYXRoLmlzZGlyKHJvb3QpOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGZvciBkcCwgZG4sIGZucyBpbiBvcy53YWxrKHJvb3QpOgogICAgICAgICAgICBkbls6XSA9IFtkIGZvciBkIGluIGRuIGlmIGQgIT0gJy5naXQnXQogICAgICAgICAgICBmb3IgZm4gaW4gZm5zOgogICAgICAgICAgICAgICAgaWYgZm4uZW5kc3dpdGgoJy5oJyk6CiAgICAgICAgICAgICAgICAgICAgbiA9IHByb2Nlc3Mob3MucGF0aC5qb2luKGRwLCBmbiksIFRydWUpCiAgICAgICAgICAgICAgICBlbGlmIGZuLmVuZHN3aXRoKCcuYycpOgogICAgICAgICAgICAgICAgICAgIG4gPSBwcm9jZXNzKG9zLnBhdGguam9pbihkcCwgZm4pLCBGYWxzZSkKICAgICAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgICAgIGlmIG46CiAgICAgICAgICAgICAgICAgICAgdG90ICs9IG4KICAgICAgICAgICAgICAgICAgICBmaWxlcyArPSAxCiAgICAgICAgICAgICAgICAgICAgcHJpbnQoJyAgJyArIHN0cihuKSArICcgICcgKyBvcy5wYXRoLmpvaW4oZHAsIGZuKSkKICAgIHByaW50KCcgIOWQiOiuoSAnICsgc3RyKHRvdCkgKyAnIOWkhCAvICcgKyBzdHIoZmlsZXMpICsgJyDmlofku7YnKQogICAgcmV0dXJuIHRvdAoKCmlmIF9fbmFtZV9fID09ICdfX21haW5fXyc6CiAgICB3YWxrKHN5cy5hcmd2WzE6XSk=' | base64 -d > /tmp/inline_fix.py
           python3 -c "import ast,sys; ast.parse(open('/tmp/inline_fix.py').read())" && echo "  [ok]   inline_fix.py 语法 OK"
-          echo "--- 内核树 ---"
-          python3 /tmp/inline_fix.py . 2>&1 | tail -50 || true
+          # ★★★ 关键：绝不碰内核核心树 ★★★
+          #   genksyms 算 CRC 靠的是类型/原型解析。
+          #   把 include/linux/*.h、mm.h、sched.h 里的 inline 全降级成 extern，
+          #   符号表会被整体改动 → 大批符号 CRC 变化（实测 129 个 vendor 符号不匹配）
+          #   内核主干里那些 inline 原厂也是这么编的，必须原样保留。
+          if [ "${EXP_NO_TREE_INLINE:-0}" = "1" ]; then
+            echo "  ★★ 跳过内核树 inline 降级 ★★"
+          fi
+          echo "--- 内核树：不动 ---"
+          echo "  [skip] 保留内核树全部 inline 原样（genksyms CRC 稳定）"
           echo "--- vendor ---"
           python3 /tmp/inline_fix.py "$V" 2>&1 | tail -50 || true
           echo "--- 残留 ^extern inline ---"
-          echo -n "tree: "; grep -rn '^extern inline' drivers include kernel mm block fs net sound crypto security 2>/dev/null | wc -l
           echo -n "vendor: "; grep -rn '^extern inline' "$V" --include=*.h --include=*.c 2>/dev/null | wc -l
 
           echo "===== C1. sensor_devinfo.c 空参数 ====="

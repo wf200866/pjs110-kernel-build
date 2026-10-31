@@ -303,6 +303,16 @@ jobs:
           echo "  ALLCONFIG $(wc -l < /tmp/allconfig) 行"
 
           echo ""
+          echo "=== 诊断：ALLCONFIG 里的触摸项在不在 ==="
+          grep -cE '^CONFIG_TOUCHPANEL' /tmp/allconfig || true
+          grep -E '^CONFIG_TOUCHPANEL_NOVA_NT36672C_NOFLASH' /tmp/allconfig || echo "  !! ALLCONFIG 里没有这一行"
+
+          echo "=== 诊断：符号链接通不通 ==="
+          ls -la drivers/input/touchscreen/oplus_touchscreen 2>&1 | head -2
+          test -f drivers/input/touchscreen/oplus_touchscreen/Kconfig \
+            && echo "  [OK] 链接通的，Kconfig 可读" \
+            || echo "  [FAIL] 链接断了"
+
           echo "=== 一次性产出 .config ==="
           cp /tmp/allconfig out/.config
           # ★ 关键：编译器必须【在 make 命令行上传】，不能只靠 export。
@@ -316,6 +326,10 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
             KCONFIG_ALLCONFIG=/tmp/allconfig olddefconfig > /tmp/cfg.log 2>&1
           RC=$?
+          echo "  --- cfg.log 里 touchpanel 相关 ---"
+          grep -i 'touchpanel' /tmp/cfg.log | head -10 || echo "  (无)"
+          echo "  --- cfg.log 里的 warning/error ---"
+          grep -iE 'warning|error' /tmp/cfg.log | head -10 || echo "  (无)"
           echo "  退出码 $RC"
           tail -4 /tmp/cfg.log || true
           if [ "$RC" -ne 0 ]; then

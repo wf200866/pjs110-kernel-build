@@ -65,6 +65,16 @@ jobs:
           sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
           ok $? "去掉 cpu_jankinfo 引用"
 
+          echo "===== A2. core 头文件 always_inline 无 body（与编译器无关，clang 也报）====="
+          sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h
+          ok $? "mm.h handle_chp_ext_cmd"
+          sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h
+          ok $? "sched.h uclamp_se_set"
+          sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h 2>/dev/null || true
+          sed -i 's/^inline void blk_crypto_flock/extern void blk_crypto_flock/' include/linux/blk-crypto.h 2>/dev/null || true
+          grep -n 'handle_chp_ext_cmd' include/linux/mm.h | head -3
+          grep -n 'uclamp_se_set' kernel/sched/sched.h | head -3
+
           echo "===== B. sensor_devinfo.c K&R 空参数（真语法错，与编译器无关）====="
           for SDI in \
             "$V/oplus/sensor/kernel/oplus_sensor_devinfo/sensor_devinfo.c" \

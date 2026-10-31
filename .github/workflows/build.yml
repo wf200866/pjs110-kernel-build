@@ -440,6 +440,11 @@ jobs:
           fi
 
           echo ""
+          echo "=== ★ alldefconfig 之后，.config 里的触摸项 ==="
+          echo "  计数: $(grep -cE '^CONFIG_TOUCHPANEL' out/.config 2>/dev/null || echo 0)"
+          grep -E 'TOUCHPANEL_(NOVA_NT36672C|FOCAL_FT8006S|HIMAX_HX83102D|ILITEK_ILITEK7807S)' out/.config 2>/dev/null | head -6 || echo "  关键 4 项都没了"
+
+          echo ""
           echo "=== 产出结果（此后一行都不改）==="
           echo "--- CFI / LTO / 编译器 ---"
           for k in CC_IS_CLANG CC_IS_GCC CLANG_VERSION GCC_VERSION LD_IS_LLD \

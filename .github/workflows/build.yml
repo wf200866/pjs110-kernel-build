@@ -467,15 +467,13 @@ jobs:
           setkv CONFIG_TOUCHPANEL_LATE_INIT y
           setkv CONFIG_TOUCHPANEL_NT_PEN_SUPPORT y
           setkv CONFIG_TOUCHPANEL_NT_DIGITALNOISE_TEST y
-          # f2fs 压缩：原厂 y，/data 是 f2fs，缺了可能挂载失败
-          # 注意：COMPRESSION 在 config 里是 "is not set" 而非整行消失，
-          # 说明 symbol 存在但被判定成 n，必须显式指定才生效。
-          setkv CONFIG_F2FS_FS_COMPRESSION y
-          setkv CONFIG_F2FS_FS_LZO y
-          setkv CONFIG_F2FS_FS_LZ4 y
-          setkv CONFIG_F2FS_FS_LZ4HC y
-          setkv CONFIG_F2FS_FS_ZSTD y
-          setkv CONFIG_LZ4HC_COMPRESS y
+          # f2fs 压缩：放弃。
+          # 已核实：fs/f2fs/compress.c 用的是旧版 Google zstd API
+          # (ZSTD_getParams / ZSTD_initCStream / ZSTD_decompressStream ...)
+          # 而 include/linux/zstd.h 提供的是上游新版 zstd_* API，
+          # 16 个调用一个都对不上 → 这棵树从来没编译过 compress.c。
+          # 原厂 config 里的 =y 是抄来的，实际没生效。开了必挂，所以不开。
+          setkv CONFIG_F2FS_FS_COMPRESSION n
           # OPPO 模块
           setkv CONFIG_OPLUS_FEATURE_OPROJECT y
           setkv CONFIG_OPLUS_FEATURE_FEEDBACK y

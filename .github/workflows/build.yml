@@ -393,17 +393,20 @@ jobs:
           clang --target=aarch64-linux-gnu -c /tmp/t.c -o /tmp/t.o && file /tmp/t.o
           mkdir -p out
           cp out.config out/.config
-          # ★ 关键：补完 Kconfig source 后，必须让 kbuild 重新解析 config
-          #   否则 out.config 里写的 =y 项会被 autoconf 丢弃
-          #   （build 阶段只 cp .config 是不够的，syncconfig 会用当前 Kconfig 重新求值）
-          echo "--- 重新解析 config（补完 Kconfig 后必须做）---"
-          set +e
-          make O=out ARCH=arm64 olddefconfig 2>&1 | tail -5
-          set -e
-          echo "--- 解析后关键项 ---"
-          grep -E '^CONFIG_(TOUCHPANEL_SYNAPTICS_TD4160|OPLUS_FEATURE_DNS_HOOK|OPLUS_BLK_MONITOR|OPLUS_CHIP_SOC_NODE)=' out/.config || true
-          echo "--- 解析后 y 项总数 ---"
-          grep -cE '^CONFIG_[A-Za-z0-9_]+=y$' out/.config || true
+          # ★★★ 不要用 olddefconfig！ ★★★
+          #
+          # 实测教训：make olddefconfig 会用默认 Kconfig 求值，
+          #   LTO_CLANG 依赖 LD_IS_LLD / CC_IS_CLANG / LLVM 等一堆条件，
+          #   被求值成不满足 → CONFIG_LTO= 消失，变成 CONFIG_LTO_NONE=y
+          #   LTO 关掉后编译方式完全不同 → struct module 布局变 → module_layout CRC 变
+          #
+          #   实测：olddefconfig 后 CRC 从 0xf3c0b168 变成 0x24f46a95
+          #         而目标是 0xddfea5da
+          #
+          # 正确做法：直接 make，让 kbuild 走 syncconfig
+          #   syncconfig 只在 .config 比 auto.conf 新时才重算，且不会撤销已有项
+          echo "--- 跳过 olddefconfig（它会关掉 LTO/CFI，破坏 CRC）---"
+          grep -E '^CONFIG_(LTO|CFI_CLANG)=' out/.config | head -5 || true
           KCF="-I$PWD/drivers/misc/mediatek/scp/include -I$PWD/drivers/misc/mediatek/include -Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces -Wno-error=builtin-declaration-mismatch -Wno-error=ignored-optimization-argument -Wno-ignored-optimization-argument -Wno-error=unknown-warning-option -Wno-unknown-warning-option -Wno-error=unused-command-line-argument -Wno-unused-command-line-argument"
           set +e
           # 彻底清掉 GCC 专有优化 flag（clang 不认识，MTK Makefile 里塞的）

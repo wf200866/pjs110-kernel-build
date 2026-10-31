@@ -305,7 +305,16 @@ jobs:
           echo ""
           echo "=== 一次性产出 .config ==="
           cp /tmp/allconfig out/.config
-          yes '' 2>/dev/null | make O=out KCONFIG_ALLCONFIG=/tmp/allconfig olddefconfig > /tmp/cfg.log 2>&1
+          # ★ 关键：编译器必须【在 make 命令行上传】，不能只靠 export。
+          # 顶层 Makefile 有 `CC = $(CROSS_COMPILE)gcc` 这类赋值，
+          # 它会覆盖环境变量，导致 kconfig 探测出 CC_IS_GCC=y，
+          # 于是 CFI_CLANG / LTO_CLANG 的 depends 全不满足，整条链被删。
+          # 命令行变量优先级最高，能压过 Makefile 赋值。
+          yes '' 2>/dev/null | make O=out ARCH=arm64 \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
+            KCONFIG_ALLCONFIG=/tmp/allconfig olddefconfig > /tmp/cfg.log 2>&1
           RC=$?
           echo "  退出码 $RC"
           tail -4 /tmp/cfg.log || true
@@ -379,7 +388,12 @@ jobs:
           md5sum out/.config
           grep -c '=y$' out/.config || true
 
-          make O=out ARCH=arm64 -j$(nproc) Image.gz > /tmp/build.log 2>&1
+          # ★ 同样在命令行传编译器，别只靠 export
+          make O=out ARCH=arm64 -j$(nproc) \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
+            Image.gz > /tmp/build.log 2>&1
           RC=$?
           set -e
 

@@ -75,6 +75,63 @@ jobs:
           grep -n 'handle_chp_ext_cmd' include/linux/mm.h | head -3
           grep -n 'uclamp_se_set' kernel/sched/sched.h | head -3
 
+          echo "===== A3. vendor 侧 always_inline 无 body（clang 下同样报）====="
+          # is_audio_task: 声明 extern inline，定义是 inline（gnu89/clang 都不发射外部符号）
+          BINDER="$V/oplus/kernel/oplus_performance/sched_assist/sched_assist_binder.h"
+          SAC="$V/oplus/kernel/oplus_performance/sched_assist/sched_assist_common.c"
+          if [ -f "$BINDER" ]; then
+            sed -i 's/^extern inline bool is_audio_task/extern bool is_audio_task/' "$BINDER"
+            ok $? "binder.h is_audio_task"
+          fi
+          if [ -f "$SAC" ]; then
+            sed -i 's/^inline bool is_audio_task(struct task_struct \*task)/bool is_audio_task(struct task_struct *task)/' "$SAC"
+            ok $? "common.c is_audio_task 定义"
+          fi
+          # zram（内核树自己的那份 + vendor 那份）
+          ZK="drivers/block/zram/zram_drv_internal.h"
+          ZKC="drivers/block/zram/zram_drv.c"
+          if [ -f "$ZK" ]; then
+            sed -i 's/^extern inline bool is_thp_zram/extern bool is_thp_zram/' "$ZK"
+            sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' "$ZK"
+            ok $? "tree zram_drv_internal.h"
+          fi
+          if [ -f "$ZKC" ]; then
+            sed -i 's/^inline unsigned long zram_page_state(struct zram \*zram, int type)/unsigned long zram_page_state(struct zram *zram, int type)/' "$ZKC"
+            sed -i 's/^inline bool is_thp_zram(struct zram \*zram)/bool is_thp_zram(struct zram *zram)/' "$ZKC"
+            ok $? "tree zram_drv.c"
+          fi
+          ZH="$V/oplus/kernel/mm/hybridswap_zram/zram_drv_internal.h"
+          ZC="$V/oplus/kernel/mm/hybridswap_zram/zram_drv.c"
+          [ -f "$ZH" ] && {
+            sed -i 's/^extern inline bool is_chp_zram/extern bool is_chp_zram/' "$ZH"
+            sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' "$ZH"
+            echo "  [ok]   vendor zram_drv_internal.h"
+          }
+          [ -f "$ZC" ] && {
+            sed -i 's/^inline bool is_chp_zram(struct zram \*zram)/bool is_chp_zram(struct zram *zram)/' "$ZC"
+            sed -i 's/^inline unsigned long zram_page_state(struct zram \*zram, int type)/unsigned long zram_page_state(struct zram *zram, int type)/' "$ZC"
+            echo "  [ok]   vendor zram_drv.c"
+          }
+          # oplus_ofp_is_support
+          OFP_H="$V/oplus/kernel/../../../drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.h"
+          OFPH="drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.h"
+          OFPC="drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.c"
+          if [ -f "$OFPH" ]; then
+            sed -i 's/^inline bool oplus_ofp_is_support(void);/extern bool oplus_ofp_is_support(void);/' "$OFPH"
+            ok $? "ofp.h 声明"
+          fi
+          if [ -f "$OFPC" ]; then
+            sed -i 's/^inline bool oplus_ofp_is_support(void)$/bool oplus_ofp_is_support(void)/' "$OFPC"
+            ok $? "ofp.c 定义"
+          fi
+          # is_dma_buf_file（内核树已有实体，删多余声明）
+          [ -f "$V/oplus/kernel/mm/mm_osvelte/memstat.h" ] && sed -i '/^extern inline int is_dma_buf_file/d' "$V/oplus/kernel/mm/mm_osvelte/memstat.h"
+          # ws_all_release（无实体，删声明）
+          [ -f "$V/oplus/kernel/wakelock_profiler/oplus_wakelock_profiler_mtk.c" ] && sed -i '/^extern inline bool ws_all_release(void);$/d' "$V/oplus/kernel/wakelock_profiler/oplus_wakelock_profiler_mtk.c"
+          # 全 vendor 残留扫描
+          echo "  --- vendor 残留 ^extern inline ---"
+          grep -rn '^extern inline' "$V" --include=*.h --include=*.c 2>/dev/null | wc -l
+
           echo "===== B. sensor_devinfo.c K&R 空参数（真语法错，与编译器无关）====="
           for SDI in \
             "$V/oplus/sensor/kernel/oplus_sensor_devinfo/sensor_devinfo.c" \

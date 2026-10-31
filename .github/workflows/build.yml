@@ -426,12 +426,31 @@ jobs:
           wc -l "$GITHUB_WORKSPACE/out/Module.symvers" 2>/dev/null || true
 
           # ★★★ 探针：量 sizeof(struct module) ★★★
-          # vendor ko 里 .gnu.linkonce.this_module 段大小 = 原厂 sizeof(struct module)
-          # 实测 10 个 ko 全是 1024 字节
-          # 如果新内核量出来不是 1024，说明 struct module 布局真的变了，
-          # 那就绝不能改 ko 的 CRC 去骗校验（会按错误偏移访问内核数据 → 随机 panic）
+                    echo ""
+          echo "=== 探针A：wlan 驱动源码在不在树里 ==="
+          for d in \
+            drivers/misc/mediatek/connectivity/wlan \
+            drivers/misc/mediatek/connectivity/wlan/gen4m \
+            drivers/misc/mediatek/connectivity/wlan/core \
+            drivers/misc/mediatek/connectivity/common \
+            ../vendor/oplus/kernel/connectivity \
+            ; do
+            if [ -d "$d" ]; then
+              echo "  [有] $d  ($(find "$d" -name '*.c' 2>/dev/null | wc -l) 个 .c)"
+            else
+              echo "  [无] $d"
+            fi
+          done
+          echo "--- 全树搜 wlan 相关 .c ---"
+          find . ../vendor -name '*wlan*' -name '*.c' 2>/dev/null | head -15
+          echo "--- 全树搜 gl_/wlan driver 关键函数 ---"
+          grep -rl 'glRegisterWlan' . ../vendor --include=*.c 2>/dev/null | head -5
+
           echo ""
-          echo "=== 探针：sizeof(struct module) ==="
+          echo "=== 探针B：原厂 ko 里哪些符号 CRC 变了（关键结论）==="
+          echo "（这决定能否靠重编 ko 修复）"
+
+          # ★★★ 探针：量 sizeof(struct module) ★★★
           export PATH="$CLANG_DIR/bin:$PATH"
           PROBE=/tmp/probe
           rm -rf "$PROBE"; mkdir -p "$PROBE"

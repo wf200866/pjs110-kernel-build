@@ -39,7 +39,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq make libncurses-dev flex bison libssl-dev bc \
-                                    cpio lld llvm
+                                    cpio lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
           # ★★★ 必须用 clang 11.0.1，和原厂完全一致 ★★★
           #
           # 为什么不能用 GCC：
@@ -339,25 +339,34 @@ jobs:
       - name: Build
         run: |
           # ★ 用 clang 11.0.1 + LLD，和原厂工具链一致
+          #
+          # clang 不像 gcc 那样自带 target 前缀，必须显式给 CROSS_COMPILE
+          #   aarch64-linux-gnu-  → kbuild 会拼成 --target=aarch64-linux-gnu
+          # 千万别 unset CROSS_COMPILE，否则 clang 按 host x86_64 编，
+          # arm64 内联汇编全报 "unknown register name 'x1'"
           export PATH="$CLANG_DIR/bin:$PATH"
           export ARCH=arm64 SUBARCH=arm64
-          export LLVM=1
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CC=clang
           export LD=ld.lld
           export AR=llvm-ar
           export NM=llvm-nm
           export OBJCOPY=llvm-objcopy
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
-          export CC=clang
-          unset CROSS_COMPILE
+          export CLANG_TRIPLE=aarch64-linux-gnu-
           clang --version | head -2
-          ld.lld --version | head -1
+          echo "  验证 target:"
+          echo 'int main(){return 0;}' > /tmp/t.c
+          clang --target=aarch64-linux-gnu -c /tmp/t.c -o /tmp/t.o && file /tmp/t.o
           mkdir -p out
           cp out.config out/.config
           KCF="-I$PWD/drivers/misc/mediatek/scp/include -I$PWD/drivers/misc/mediatek/include -Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces -Wno-error=builtin-declaration-mismatch"
           set +e
-          make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
-               LLVM=1 LLVM_IAS=1 \
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+               CC="clang --target=aarch64-linux-gnu" \
+               LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
+               OBJDUMP=llvm-objdump READELF=llvm-readelf STRIP=llvm-strip \
                -j$(nproc) Image.gz KCFLAGS="$KCF" > /tmp/build.log 2>&1
           RC=$?
           set -e

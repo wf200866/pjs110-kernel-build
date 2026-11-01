@@ -39,41 +39,36 @@ jobs:
           grep -E '^CONFIG_(MODULE_SIG|MODVERSIONS|MODULE_UNLOAD|CLANG_VERSION)=' /tmp/buildB.config
           grep -E '^CONFIG_(LTO|CFI|THINLTO)' /tmp/buildB.config || echo "  (LTO/CFI all off - good)"
 
-      - name: Toolchain (clang 14)
+      - name: Toolchain
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq make libncurses-dev flex bison libssl-dev bc \
-                                    cpio lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+                                    cpio lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu openssl
           set -e
-          # 目标：clang 14.0.x（能开机那版是 14.0.7 / r450784e）
-          # v7 实测：git 预构建源 404、llvm 官方没有 ubuntu-18.04 变体 → 用官方 rhel-8.4 包
-          #          （glibc 向前兼容：RHEL8.4=glibc2.28 < Ubuntu22.04=glibc2.35，能跑）
-          CLANG_DIR="$HOME/clang-14"
+          # clang 14 实测两条路都翻车：
+          #   14.0.0/14.0.6 编这棵 4.19 MTK 树 → kernel/bounds.s 直接炸
+          #     (atomic_ll_sc.h: unknown type name 'atomic64_t')，20 errors
+          # clang 11.0.1 (r383902) 是 v5 五次成功构建的同款工具链，实测能编完这棵树
+          # 承重墙是 config 里的 MODULE_SIG/CFI/LTO 开关（已锁定），编译器版本不影响
+          # struct module 布局，也不进 vermagic
+          CLANG_DIR="$HOME/clang-r383902"
           rm -rf "$CLANG_DIR"
-          echo "  fetching clang+llvm 14.0.6 (official rhel-8.4 prebuilt, 602MB)..."
-          OK=0
-          if curl -sL --retry 3 --max-time 540 -o /tmp/clang.tar.xz \
-            https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/clang+llvm-14.0.6-x86_64-linux-gnu-rhel-8.4.tar.xz \
-            && [ -s /tmp/clang.tar.xz ]; then
+          echo "  fetching clang 11.0.1 (r383902, v5-proven)..."
+          if git clone --depth 1 --branch lineage-20 \
+               https://github.com/Jacksonzwang/android_prebuilts_clang_kernel_linux-x86_clang-r383902.git \
+               "$CLANG_DIR" 2>&1 | tail -3; then
+            echo "  [ok] clone done"
+          else
+            echo "  [warn] clone failed, trying tarball"
             mkdir -p "$CLANG_DIR"
-            if tar xJf /tmp/clang.tar.xz -C "$CLANG_DIR" --strip-components=1 2>/dev/null; then
-              if [ -x "$CLANG_DIR/bin/clang" ] && [ -x "$CLANG_DIR/bin/ld.lld" ]; then OK=1; fi
-            fi
+            curl -sL --max-time 600 -o /tmp/clang.tar.gz \
+              "https://github.com/Jacksonzwang/android_prebuilts_clang_kernel_linux-x86_clang-r383902/archive/refs/heads/lineage-20.tar.gz"
+            tar xzf /tmp/clang.tar.gz -C "$CLANG_DIR" --strip-components=1
           fi
-          rm -f /tmp/clang.tar.xz
-          if [ "$OK" != "1" ]; then
-            echo "  [warn] tarball failed, fallback to apt clang-14"
-            sudo apt-get install -y -qq clang-14 lld-14
-            rm -rf "$CLANG_DIR"; mkdir -p "$CLANG_DIR/bin"
-            for t in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
-              SRC=$(command -v $t-14 || command -v $t) || true
-              [ -n "$SRC" ] && ln -sf "$SRC" "$CLANG_DIR/bin/$t" || true
-            done
-            test -x "$CLANG_DIR/bin/clang" || { echo "!! apt fallback failed"; exit 1; }
-            "$CLANG_DIR/bin/clang" --version | head -1
-          fi
+          test -x "$CLANG_DIR/bin/clang" || { echo "!! no bin/clang"; exit 1; }
+          test -x "$CLANG_DIR/bin/ld.lld" || { echo "!! no bin/ld.lld"; exit 1; }
           echo "$CLANG_DIR/bin" >> $GITHUB_PATH
-          "$CLANG_DIR/bin/clang" --version | head -3
+          "$CLANG_DIR/bin/clang" --version | head -2
 
       - name: Patch kernel source
         run: |
@@ -103,7 +98,7 @@ jobs:
 
       - name: Build
         run: |
-          export PATH="$HOME/clang-14/bin:$PATH"
+          export PATH="$HOME/clang-r383902/bin:$PATH"
           export ARCH=arm64 SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm

@@ -221,6 +221,13 @@ jobs:
             fi
           done
 
+          # D11. back_tap_detecthub：vendor 头缺 ID_BACK_TAP_DETECT 枚举，模块整个禁编
+          #      （v7 实测：背敲检测，与开机/WiFi 无关，直接注释 obj 行）
+          for f in $(grep -rl 'back_tap_detecthub' drivers/misc/mediatek/sensor/2.0 --include=Makefile 2>/dev/null); do
+            sed -i '/back_tap_detecthub/{/^[[:space:]]*obj-/s/^/# [pjs110] disabled: /}' "$f"
+            echo "  [ok] back_tap_detecthub obj line commented in $f"
+          done
+
           [ "$fail" -eq 0 ] && echo "PATCH OK" || { echo "!! patch failed"; exit 1; }
 
       - name: Build

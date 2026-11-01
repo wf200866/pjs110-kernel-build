@@ -200,18 +200,24 @@ jobs:
           fi
 
           # D10. imgsensor 死引用：给缺 Makefile 的传感器目录建空桩
-          #      （v7 实测：ov16a1q_mipi_raw_hawaii 缺 Makefile → No rule to make target）
-          #      v1 修法（注释引用行）失败：Makefile 里引用形式带变量前缀，匹配不上。
-          #      v2 修法：提取所有 v1_1/NAME 引用，目标没有 Makefile 就建空桩——
-          #      空 Makefile = 目录可进入但什么都不编，零副作用，不用管引用形式。
+          #      v2 教训：引用可能藏在 .mk / 非标准名文件里，--include=Makefile 漏网
+          #      v3：扫 $DS 下所有文本文件的 v1_1/NAME 引用，缺就建空桩
+          #      空 Makefile = 目录可进入但什么都不编，零副作用
           DS=drivers/misc/mediatek/imgsensor/src
           mkdir -p "$DS/common/v1_1" 2>/dev/null
-          for name in $(grep -rhoE 'v1_1/[A-Za-z0-9_]+' "$DS" --include=Makefile 2>/dev/null | sed 's|^.*v1_1/||' | sort -u); do
+          for name in $(grep -rhoE 'v1_1/[A-Za-z0-9_]+' "$DS" 2>/dev/null | sed 's|^.*v1_1/||' | sort -u); do
             [ -n "$name" ] || continue
             if [ ! -f "$DS/common/v1_1/$name/Makefile" ]; then
               mkdir -p "$DS/common/v1_1/$name"
               : > "$DS/common/v1_1/$name/Makefile"
               echo "  [ok] imgsensor stub: $name"
+            fi
+          done
+          # 兜底：直接针对已知缺失项（v7 三轮实测）
+          for name in ov16a1q_mipi_raw_hawaii; do
+            if [ ! -f "$DS/common/v1_1/$name/Makefile" ]; then
+              mkdir -p "$DS/common/v1_1/$name"; : > "$DS/common/v1_1/$name/Makefile"
+              echo "  [ok] imgsensor stub (hardcoded): $name"
             fi
           done
 

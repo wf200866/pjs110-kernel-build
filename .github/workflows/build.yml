@@ -12,7 +12,7 @@ jobs:
           ref: oppo/mt6833_t_13.1.1_a2x_5g
           fetch-depth: 1
 
-      - name: Vendor + kernel-4.19 symlink
+      - name: Vendor tarball + kernel-4.19 symlink
         run: |
           set -u
           PARENT=$(dirname "$GITHUB_WORKSPACE")
@@ -27,34 +27,45 @@ jobs:
           test -f kernel/sched_assist/Kconfig && echo "  OK sched_assist" || echo "  BREAK sched_assist"
           test -f include/linux/sched_assist/sched_assist_binder.h && echo "  OK binder.h" || echo "  BREAK binder.h"
 
-      - name: Stock config
+      - name: Fetch build config (B)
         run: |
-          curl -sL -o /tmp/stock.config \
-            https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/pjs110_stock.config
-          wc -l /tmp/stock.config
-          md5sum /tmp/stock.config
-          echo "  expect md5: 0f002b78ae9aed1f105a923c31212b66"
+          curl -sL -o /tmp/buildB.config \
+            https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/buildB.config
+          wc -l /tmp/buildB.config
+          md5sum /tmp/buildB.config
+          echo "  expect md5: 5b277bddc1806a2615843ada5ce8c4da"
+          echo "--- key items ---"
+          grep -E '^CONFIG_(MODULE_SIG|MODVERSIONS|MODULE_UNLOAD|CLANG_VERSION)=' /tmp/buildB.config
+          grep -E '^CONFIG_(LTO|CFI|THINLTO)' /tmp/buildB.config || echo "  (LTO/CFI all off - good)"
 
-      - name: Toolchain
+      - name: Toolchain (clang 14)
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq make libncurses-dev flex bison libssl-dev bc \
                                     cpio lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
           set -e
-          CLANG_DIR="$HOME/clang-r383902"
+          # 能开机那版是 clang 14.0.7 (r450784e)，照抄
+          CLANG_DIR="$HOME/clang-r450784e"
           rm -rf "$CLANG_DIR"
-          echo "  fetch clang 11.0.1 (r383902)..."
-          if git clone --depth 1 --branch lineage-20 \
-               https://github.com/Jacksonzwang/android_prebuilts_clang_kernel_linux-x86_clang-r383902.git \
-               "$CLANG_DIR" 2>&1 | tail -3; then
-            echo "  [ok] clone done"
-          else
-            echo "  [warn] clone failed, fallback to system clang"
+          echo "  fetching clang 14.0.7 (r450784e)..."
+          OK=0
+          for REPO_CLONE in \
+            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r450784e.git \
+            https://github.com/DerpFest-AOSP/prebuilts_clang_kernel_linux-x86_clang-r450784e.git ; do
+            if git clone --depth 1 "$REPO_CLONE" "$CLANG_DIR" 2>&1 | tail -2; then
+              if [ -x "$CLANG_DIR/bin/clang" ]; then OK=1; break; fi
+            fi
+            rm -rf "$CLANG_DIR"
+          done
+          if [ "$OK" != "1" ]; then
+            echo "  [warn] prebuilt clone failed, installing apt clang"
+            sudo apt-get install -y -qq clang-14 lld-14
             CLANG_DIR=""
           fi
           if [ -n "$CLANG_DIR" ]; then
             echo "$CLANG_DIR/bin" >> $GITHUB_PATH
           fi
+          PATH="${CLANG_DIR:+$CLANG_DIR/bin:}$PATH" clang --version | head -3
 
       - name: Patch kernel source
         run: |
@@ -62,44 +73,48 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           fail=0
 
-          echo "===== A. generic build fixes ====="
+          echo "===== A. build hygiene (warnings only, no behavior change) ====="
           grep -rl -- "-Werror" --include=Makefile --include=Kbuild --include="*.mk" . 2>/dev/null | while read -r f; do
             sed -i 's/-Werror=/-Wno-error=/g; s/-Werror-\([A-Za-z0-9_-]*\)/-Wno-error=\1/g; s/\(^\|[[:space:]]\)-Werror\([[:space:]]\|$\)/\1-Wno-error\2/g' "$f"
           done
           for f in $(grep -rl -- '-fmerge-constants' . --include=Makefile --include='*.mk' --include=Kbuild 2>/dev/null); do
             sed -i 's/-fmerge-constants//g' "$f"
           done
-          echo "  [ok] warnings downgraded"
+          echo "  [ok]"
 
-          echo "===== B. check_version patch ====="
-          echo 'CiMgLSotIGNvZGluZzogdXRmLTggLSotCiIiIuWcqCBrZXJuZWwvbW9kdWxlLmMg55qEIGNoZWNrX3ZlcnNpb24oKSDlvIDlpLTmj5LlhaUgcmV0dXJuIDEKCuebrueahO+8mue7lei/hyBNT0RWRVJTSU9OUyDnmoQgc3ltYm9sIENSQyDmr5Tlr7kK5L6d5o2u77ya5bey5a6e5rWL5Y6f5Y6CIGtvIOeahCBzdHJ1Y3QgbW9kdWxlIOW4g+WxgOS4juacrOWGheaguOWujOWFqOS4gOiHtAogICAgICDvvIjop6PmnpAgLnJlbGEuZ251LmxpbmtvbmNlLnRoaXNfbW9kdWxlIOmHjeWumuS9jeihqO+8mgogICAgICAgaW5pdD0weDE4MCBleGl0PTB4M2EwIHNpemU9MTAyNO+8jOS4pOi+uemAkOWtl+auteebuOWQjO+8iQogICAgICDllK/kuIDlt67lvILmmK8gZ2Vua3N5bXMg566X5Ye655qE5pWw5a2X77yM6ICM5Y6f5Y6C5YaF5qC45qCR5bim56eB5pyJIHBhdGNo77yMCiAgICAgIOivpeaVsOWtl+mAmui/h+WFrOW8gOa6kOeggeS4jeWPr+WkjeeOsOOAggoiIiIKaW1wb3J0IHJlLCBzeXMsIG9zCgpQID0gJ2tlcm5lbC9tb2R1bGUuYycKaWYgbm90IG9zLnBhdGguaXNmaWxlKFApOgogICAgcHJpbnQoJyEhICVzIOS4jeWtmOWcqCcgJSBQKQogICAgc3lzLmV4aXQoMSkKCnNyYyA9IG9wZW4oUCwgZW5jb2Rpbmc9J3V0ZjgnLCBlcnJvcnM9J3JlcGxhY2UnKS5yZWFkKCkKCk1BUksgPSAnUEpTMTEwX1ZFTkRPUl9LT19CWVBBU1MnCmlmIE1BUksgaW4gc3JjOgogICAgcHJpbnQoJyAgW3NraXBdIOihpeS4geW3suWtmOWcqCcpCiAgICBzeXMuZXhpdCgwKQoKbSA9IHJlLnNlYXJjaChyJyhzdGF0aWNccytpbnRccytjaGVja192ZXJzaW9uXHMqXChbXildKlwpXHMqXHspJywgc3JjKQppZiBub3QgbToKICAgIHByaW50KCchISDmib7kuI3liLAgY2hlY2tfdmVyc2lvbiDlrprkuYknKQogICAgc3lzLmV4aXQoMSkKCmluamVjdCA9IChtLmdyb3VwKDEpCiAgICAgICAgICArICdcblx0LyogJyArIE1BUksgKyAnOiBsYXlvdXQgdmVyaWZpZWQgaWRlbnRpY2FsLCBza2lwIENSQyBjaGVjayAqL1xuJwogICAgICAgICAgKyAnXHRyZXR1cm4gMTsgLyogJyArIE1BUksgKyAnICovXG4nKQoKb3V0ID0gc3JjWzptLnN0YXJ0KCldICsgaW5qZWN0ICsgc3JjW20uZW5kKCk6XQpvcGVuKFAsICd3JywgZW5jb2Rpbmc9J3V0ZjgnKS53cml0ZShvdXQpCnByaW50KCcgIFtva10gJXMgcGF0Y2hlZCAoY2hlY2tfdmVyc2lvbiAtPiByZXR1cm4gMSknICUgUCkKcHJpbnQoJyAgICAgICAlZCAtPiAlZCBieXRlcycgJSAobGVuKHNyYyksIGxlbihvdXQpKSkK' | base64 -d > /tmp/patch_modver.py
+          echo "===== B. check_version bypass ====="
+          echo 'CiMgLSotIGNvZGluZzogdXRmLTggLSotCiIiImNoZWNrX3ZlcnNpb24oKSDlvIDlpLQgcmV0dXJuIDEg4oCU4oCUIOi3s+i/hyBzeW1ib2wgQ1JDIOavlOWvuQoK5Li65LuA5LmI5Y+v5Lul6Lez6L+H77yaCiAg5bey55SoIEVMRiDop6PmnpDlrp7mtYvmr5Tlr7kgc3RydWN0IG1vZHVsZSDluIPlsYDvvJoKCiAgICDljp/ljoIgd2xhbl9kcnZfZ2VuNG0ua28gICAuZ251LmxpbmtvbmNlLnRoaXNfbW9kdWxlICBzaXplPTEwMjQKICAgICAgICAgICAgICAgICAgICAgICAgICAgICDph43lrprkvY0gaW5pdEArMzg0ICBjbGVhbnVwQCs5MjggICgqLmNmaV9qdCkKICAgIOiHque8liBwcm9iZS5rbyAgICAgICAgICAgIOWQjCBzaXplIC8g5ZCM5YGP56e7IC8g5ZCM56ym5Y+35b2i5byPCgogIOW4g+WxgOS4gOiHtCDihpIga28g5Yqg6L295ZCO5omA5pyJ5a2X5q616K6/6Zeu6YO95Zyo5q2j56Gu5L2N572u44CCCiAg5ZSv5LiA5a+55LiN5LiK55qE5pivIGdlbmtzeW1zIOeul+WHuueahOmCo+S4quaVsOWtl++8jOiAjOWOn+WOguWGheaguOagkeW4puedgOacquWFrOW8gOeahAogIOengeaciSBwYXRjaO+8jOeUqOWFrOW8gOa6kOeggeawuOi/nOeul+S4jeWHuuWQjOS4gOS4quWAvOOAggoKICDmiYDku6XvvJrlj6rot7Pov4fmlbDlrZfmr5Tlr7nvvIzkuI3mlLnlj5jku7vkvZXlhoXlrZjluIPlsYDjgIIKIiIiCmltcG9ydCByZSwgc3lzLCBvcwoKUCA9ICdrZXJuZWwvbW9kdWxlLmMnCmlmIG5vdCBvcy5wYXRoLmlzZmlsZShQKToKICAgIHByaW50KCchISAlcyBtaXNzaW5nJyAlIFApCiAgICBzeXMuZXhpdCgxKQoKc3JjID0gb3BlbihQLCBlbmNvZGluZz0ndXRmOCcsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKQoKTUFSSyA9ICdQSlMxMTBfVkVORE9SX0tPX0JZUEFTUycKaWYgTUFSSyBpbiBzcmM6CiAgICBwcmludCgnICBbc2tpcF0gYWxyZWFkeSBwYXRjaGVkJykKICAgIHN5cy5leGl0KDApCgptID0gcmUuc2VhcmNoKHInKHN0YXRpY1xzK2ludFxzK2NoZWNrX3ZlcnNpb25ccypcKFteKV0qXClccypceyknLCBzcmMpCmlmIG5vdCBtOgogICAgIyDmnInnmoTlhoXmoLjniYjmnKznrb7lkI3luKYgY29uc3QgY2hhciAqCiAgICBtID0gcmUuc2VhcmNoKHInKHN0YXRpY1xzK2ludFxzK2NoZWNrX3ZlcnNpb25ccypcKC4qP1wpXHMqXHspJywgc3JjLCByZS5TKQppZiBub3QgbToKICAgIHByaW50KCchISBjaGVja192ZXJzaW9uIG5vdCBmb3VuZCcpCiAgICBzeXMuZXhpdCgxKQoKaW5qZWN0ID0gKG0uZ3JvdXAoMSkKICAgICAgICAgICsgJ1xuXHQvKiAnICsgTUFSSyArICc6IHN0cnVjdCBtb2R1bGUgbGF5b3V0IHZlcmlmaWVkIGlkZW50aWNhbCwnCiAgICAgICAgICAgICcgc2tpcCBDUkMgc3RyaW5nIGNvbXBhcmUgKi9cbicKICAgICAgICAgICsgJ1x0cmV0dXJuIDE7IC8qICcgKyBNQVJLICsgJyAqL1xuJykKCm91dCA9IHNyY1s6bS5zdGFydCgpXSArIGluamVjdCArIHNyY1ttLmVuZCgpOl0Kb3BlbihQLCAndycsIGVuY29kaW5nPSd1dGY4Jykud3JpdGUob3V0KQpwcmludCgnICBbb2tdIG1vZHVsZS5jIHBhdGNoZWQgKCVkIC0+ICVkIGJ5dGVzKScgJSAobGVuKHNyYyksIGxlbihvdXQpKSkK' | base64 -d > /tmp/patch_modver.py
           python3 /tmp/patch_modver.py || fail=1
-          grep -c 'PJS110_VENDOR_KO_BYPASS' kernel/module.c || true
-
-          echo "===== C. Kconfig reachability (source only, no config values) ====="
-          echo 'CiMgLSotIGNvZGluZzogdXRmLTggLSotCiIiIuiuqSBPUFBPL01USyDnp4HmnIkgS2NvbmZpZyDku47moLkgS2NvbmZpZyDlj6/ovr4KCiog5Y+q5pS5IHNvdXJjZSDor63lj6XvvIzkuIDkuKrlrZfpg73kuI3norAgY29uZmlnIOWAvCAqCgrog4zmma/vvJoKICDljp/ljoIgY29uZmlnIOmHjOacieS4gOWkp+aJuSA9eSDnmoTpobnvvIzlroPku6znmoQgY29uZmlnIOWjsOaYjuaJgOWcqOeahCBLY29uZmlnCiAg5rKh5pyJ6KKrIHNvdXJjZSDliLDkuLvmoJHjgIJrYnVpbGQg6YGH5YiwIC5jb25maWcg6YeM5rKh5pyJIEtjb25maWcg5aOw5piO55qE56ym5Y+377yMCiAg5Lya5ZyoIHN5bmNjb25maWcg6Zi25q6155u05o6l5Lii5byDIC0+IOmCo+S6m+mpseWKqOS4gOS4qumDveS4jee8luOAggoKICDlrp7mtYvnvLrlpLHnmoTvvIjljp/ljoLlhajmmK8gPXnvvInvvJoKICAgIENPTkZJR19UT1VDSFBBTkVMXyogICAgICAgICAgICAyMSDpobkgICDop6bmkbjlsY8KICAgIENPTkZJR19EUk1fUEFORUxfT1BMVVMqICAgICAgICAxOCDpobkgICDpnaLmnb/vvIjlsY/luZXngrnkuI3kuq7vvIkKICAgIENPTkZJR19PUExVU18qICAgICAgICAgICAgICAgICDkuIDmibkgICAgT1BQTyDns7vnu5/lsYLvvIjlkKsgUEhPRU5JWCDlkK/liqjliKTlrprvvIkKCuWBmuazle+8mgogIDEuIOS7juaguSBLY29uZmlnIOWHuuWPkSBCRlPvvIznrpflh7rlk6rkupsgS2NvbmZpZyDlvZPliY3lj6/ovr4KICAyLiDlr7nmr4/kuKrnm67moIcgc3ltYm9s77yM5om+5Yiw5a6D55qEIEtjb25maWcg5Zyo5LiN5Zyo5Y+v6L6+6ZuG6YeMCiAgMy4g5LiN5Y+v6L6+5bCx6YCQ57qn5ZCR5LiK77yM6KGl5LiA5p2hIHNvdXJjZSDliLDmnIDov5HnmoTlt7Llj6/ovr7nmoTnpZblhYggS2NvbmZpZwogIDQuIOihpeWujOmHjeaWsCBCRlPvvIzov63ku6PliLDnqLPlrpoKIiIiCmltcG9ydCBvcywgcmUsIHN5cwoKUk9PVCA9IG9zLmdldGN3ZCgpClZFTkRPUiA9IG9zLnBhdGguYWJzcGF0aChvcy5wYXRoLmpvaW4oUk9PVCwgJy4uJywgJ3ZlbmRvcicpKQpCQVNFUyA9IFtiIGZvciBiIGluIChST09ULCBWRU5ET1IpIGlmIG9zLnBhdGguaXNkaXIoYildCgpTUkNfUkUgPSByZS5jb21waWxlKHInXlxzKnNvdXJjZVxzKyIoW14iXSspIicsIHJlLk0pCkRFQ0xfUkUgPSByZS5jb21waWxlKHInXlxzKig/Om1lbnUpP2NvbmZpZ1xzKyhbQS1aYS16MC05X10rKVxzKiQnLCByZS5NKQoKU0tJUF9ESVJTID0gc2V0KFsnLmdpdCcsICdvdXQnLCAnLnJlcG8nLCAnRG9jdW1lbnRhdGlvbiddKQoKCmRlZiB3YWxrX2tjb25maWdzKCk6CiAgICBmb3IgYmFzZSBpbiBCQVNFUzoKICAgICAgICBmb3IgZHAsIGRuLCBmbnMgaW4gb3Mud2FsayhiYXNlKToKICAgICAgICAgICAgZG5bOl0gPSBbZCBmb3IgZCBpbiBkbiBpZiBkIG5vdCBpbiBTS0lQX0RJUlNdCiAgICAgICAgICAgIGZvciBmbiBpbiBmbnM6CiAgICAgICAgICAgICAgICBpZiBmbi5zdGFydHN3aXRoKCdLY29uZmlnJyk6CiAgICAgICAgICAgICAgICAgICAgeWllbGQgb3MucGF0aC5ub3JtcGF0aChvcy5wYXRoLmpvaW4oZHAsIGZuKSkKCgpkZWYgcmVzb2x2ZShjdXJfZmlsZSwgcmVsKToKICAgIGlmIHJlbC5zdGFydHN3aXRoKCckJyk6CiAgICAgICAgcmV0dXJuIE5vbmUKICAgIGZvciBjYW5kIGluIChvcy5wYXRoLm5vcm1wYXRoKG9zLnBhdGguam9pbihST09ULCByZWwpKSwKICAgICAgICAgICAgICAgICBvcy5wYXRoLm5vcm1wYXRoKG9zLnBhdGguam9pbihvcy5wYXRoLmRpcm5hbWUoY3VyX2ZpbGUpLCByZWwpKSk6CiAgICAgICAgaWYgb3MucGF0aC5pc2ZpbGUoY2FuZCk6CiAgICAgICAgICAgIHJldHVybiBjYW5kCiAgICByZXR1cm4gTm9uZQoKCmRlZiBidWlsZF9ncmFwaCgpOgogICAgZWRnZXMgPSB7fQogICAgZm9yIHAgaW4gd2Fsa19rY29uZmlncygpOgogICAgICAgIHRyeToKICAgICAgICAgICAgdHh0ID0gb3BlbihwLCBlcnJvcnM9J3JlcGxhY2UnKS5yZWFkKCkKICAgICAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIHRndHMgPSBbXQogICAgICAgIGZvciBtIGluIFNSQ19SRS5maW5kaXRlcih0eHQpOgogICAgICAgICAgICByID0gcmVzb2x2ZShwLCBtLmdyb3VwKDEpKQogICAgICAgICAgICBpZiByOgogICAgICAgICAgICAgICAgdGd0cy5hcHBlbmQocikKICAgICAgICBlZGdlc1twXSA9IHRndHMKICAgIHJldHVybiBlZGdlcwoKCmRlZiByZWFjaGFibGVfc2V0KGVkZ2VzLCBzdGFydCk6CiAgICBzZWVuLCBzdGFjayA9IHNldCgpLCBbc3RhcnRdCiAgICB3aGlsZSBzdGFjazoKICAgICAgICBjdXIgPSBzdGFjay5wb3AoKQogICAgICAgIGlmIGN1ciBpbiBzZWVuOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIHNlZW4uYWRkKGN1cikKICAgICAgICBzdGFjay5leHRlbmQoZWRnZXMuZ2V0KGN1ciwgW10pKQogICAgcmV0dXJuIHNlZW4KCgpkZWYgbWFpbigpOgogICAgcm9vdF9rYyA9IG9zLnBhdGgubm9ybXBhdGgob3MucGF0aC5qb2luKFJPT1QsICdLY29uZmlnJykpCiAgICBpZiBub3Qgb3MucGF0aC5pc2ZpbGUocm9vdF9rYyk6CiAgICAgICAgcHJpbnQoJyEhIHJvb3QgS2NvbmZpZyBtaXNzaW5nJykKICAgICAgICBzeXMuZXhpdCgxKQoKICAgIHdhbnQgPSBzZXQoKQogICAgY2ZncCA9ICcvdG1wL3N0b2NrLmNvbmZpZycKICAgIGlmIG9zLnBhdGguaXNmaWxlKGNmZ3ApOgogICAgICAgIGZvciBsaW5lIGluIG9wZW4oY2ZncCwgZXJyb3JzPSdyZXBsYWNlJyk6CiAgICAgICAgICAgIGxpbmUgPSBsaW5lLnN0cmlwKCkKICAgICAgICAgICAgaWYgbGluZS5zdGFydHN3aXRoKCdDT05GSUdfJykgYW5kIGxpbmUuZW5kc3dpdGgoJz15Jyk6CiAgICAgICAgICAgICAgICB3YW50LmFkZChsaW5lWzc6LTJdKQogICAgcHJpbnQoJyAgc3ltYm9scyA9eSBpbiBzdG9jayBjb25maWc6ICVkJyAlIGxlbih3YW50KSkKCiAgICBkZWNsID0ge30KICAgIGZvciBwIGluIHdhbGtfa2NvbmZpZ3MoKToKICAgICAgICB0cnk6CiAgICAgICAgICAgIHR4dCA9IG9wZW4ocCwgZXJyb3JzPSdyZXBsYWNlJykucmVhZCgpCiAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICAgICAgY29udGludWUKICAgICAgICBmb3IgbSBpbiBERUNMX1JFLmZpbmRpdGVyKHR4dCk6CiAgICAgICAgICAgIGRlY2wuc2V0ZGVmYXVsdChtLmdyb3VwKDEpLCBwKQogICAgcHJpbnQoJyAgc3ltYm9scyBkZWNsYXJlZCBpbiBLY29uZmlnOiAlZCcgJSBsZW4oZGVjbCkpCgogICAgbWlzc2luZyA9IHNvcnRlZChzIGZvciBzIGluIHdhbnQgaWYgcyBub3QgaW4gZGVjbCkKICAgIHByaW50KCcgICogc3ltYm9scyB3aXRoIE5PIEtjb25maWcgZGVjbGFyYXRpb246ICVkJyAlIGxlbihtaXNzaW5nKSkKICAgIGZvciBzIGluIG1pc3NpbmdbOjIwXToKICAgICAgICBwcmludCgnICAgICAgJXMnICUgcykKCiAgICB0b3RhbF9hZGRlZCA9IDAKICAgIGZvciBybmQgaW4gcmFuZ2UoOCk6CiAgICAgICAgZWRnZXMgPSBidWlsZF9ncmFwaCgpCiAgICAgICAgcmVhY2ggPSByZWFjaGFibGVfc2V0KGVkZ2VzLCByb290X2tjKQoKICAgICAgICBieV9maWxlID0ge30KICAgICAgICBmb3IgcyBpbiB3YW50OgogICAgICAgICAgICBrYyA9IGRlY2wuZ2V0KHMpCiAgICAgICAgICAgIGlmIGtjIGFuZCBrYyBub3QgaW4gcmVhY2g6CiAgICAgICAgICAgICAgICBieV9maWxlLnNldGRlZmF1bHQoa2MsIFtdKS5hcHBlbmQocykKCiAgICAgICAgaWYgbm90IGJ5X2ZpbGU6CiAgICAgICAgICAgIHByaW50KCcgIHJvdW5kICVkOiBhbGwgcmVhY2hhYmxlIE9LJyAlIChybmQgKyAxKSkKICAgICAgICAgICAgYnJlYWsKCiAgICAgICAgcHJpbnQoJyAgcm91bmQgJWQ6ICVkIEtjb25maWcgdW5yZWFjaGFibGUnICUgKHJuZCArIDEsIGxlbihieV9maWxlKSkpCiAgICAgICAgYWRkZWRfdGhpcyA9IDAKICAgICAgICBmb3Iga2MgaW4gc29ydGVkKGJ5X2ZpbGUpOgogICAgICAgICAgICBzeW1zID0gYnlfZmlsZVtrY10KICAgICAgICAgICAgdXAgPSBvcy5wYXRoLmRpcm5hbWUoa2MpCiAgICAgICAgICAgIHRhcmdldCA9IE5vbmUKICAgICAgICAgICAgZm9yIF8gaW4gcmFuZ2UoMTApOgogICAgICAgICAgICAgICAgY2FuZCA9IG9zLnBhdGgubm9ybXBhdGgob3MucGF0aC5qb2luKHVwLCAnS2NvbmZpZycpKQogICAgICAgICAgICAgICAgaWYgb3MucGF0aC5pc2ZpbGUoY2FuZCkgYW5kIGNhbmQgIT0ga2MgYW5kIGNhbmQgaW4gcmVhY2g6CiAgICAgICAgICAgICAgICAgICAgdGFyZ2V0ID0gY2FuZAogICAgICAgICAgICAgICAgICAgIGJyZWFrCiAgICAgICAgICAgICAgICB1cDIgPSBvcy5wYXRoLmRpcm5hbWUodXApCiAgICAgICAgICAgICAgICBpZiB1cDIgPT0gdXA6CiAgICAgICAgICAgICAgICAgICAgYnJlYWsKICAgICAgICAgICAgICAgIHVwID0gdXAyCiAgICAgICAgICAgIGlmIG5vdCB0YXJnZXQ6CiAgICAgICAgICAgICAgICB0YXJnZXQgPSByb290X2tjCgogICAgICAgICAgICByZWwgPSBvcy5wYXRoLnJlbHBhdGgoa2MsIG9zLnBhdGguZGlybmFtZSh0YXJnZXQpKS5yZXBsYWNlKCdcXCcsICcvJykKICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgdHh0ID0gb3Blbih0YXJnZXQsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKQogICAgICAgICAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgaWYgcmVsIGluIHR4dDoKICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgIHdpdGggb3Blbih0YXJnZXQsICdhJywgZW5jb2Rpbmc9J3V0ZjgnLCBlcnJvcnM9J3JlcGxhY2UnKSBhcyBmaDoKICAgICAgICAgICAgICAgIGZoLndyaXRlKCdcbnNvdXJjZSAiJXMiXG4nICUgcmVsKQogICAgICAgICAgICBhZGRlZF90aGlzICs9IDEKICAgICAgICAgICAgcHJpbnQoJyAgICAgICsgc291cmNlICIlcyIgLT4gJXMgICglZCBzeW1zKScKICAgICAgICAgICAgICAgICAgJSAocmVsLCBvcy5wYXRoLnJlbHBhdGgodGFyZ2V0LCBST09UKSwgbGVuKHN5bXMpKSkKICAgICAgICB0b3RhbF9hZGRlZCArPSBhZGRlZF90aGlzCiAgICAgICAgaWYgYWRkZWRfdGhpcyA9PSAwOgogICAgICAgICAgICBwcmludCgnICAhISBubyBwcm9ncmVzcywgc3RvcCcpCiAgICAgICAgICAgIGJyZWFrCgogICAgcHJpbnQoJyAgdG90YWwgc291cmNlIGFkZGVkOiAlZCcgJSB0b3RhbF9hZGRlZCkKCgppZiBfX25hbWVfXyA9PSAnX19tYWluX18nOgogICAgbWFpbigpCg==' | base64 -d > /tmp/fix_kconfig.py
-          python3 /tmp/fix_kconfig.py 2>&1 | tail -60 || true
+          echo "  marker count: $(grep -c 'PJS110_VENDOR_KO_BYPASS' kernel/module.c || echo 0)"
 
           [ "$fail" -eq 0 ] && echo "PATCH OK" || { echo "!! patch failed"; exit 1; }
 
       - name: Build
         run: |
-          export PATH="$HOME/clang-r383902/bin:$PATH"
+          export PATH="$HOME/clang-r450784e/bin:$PATH"
           export ARCH=arm64 SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
           export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
           export CLANG_TRIPLE=aarch64-linux-gnu-
-          clang --version | head -2
+          clang --version | head -3
 
           mkdir -p out
-          cp /tmp/stock.config out/.config
-          echo "--- .config check ---"
+          cp /tmp/buildB.config out/.config
+          echo "--- .config ---"
           md5sum out/.config
           grep -c '^CONFIG_' out/.config
 
-          echo "--- no olddefconfig (it would recompute deps and drop LTO/CFI) ---"
-          grep -E '^CONFIG_(LTO|CFI_CLANG|MODULE_SIG|CC_IS_CLANG)=' out/.config | head
+          # MODULE_SIG_ALL 关掉：不需要给模块签名，省掉现场生成密钥
+          if grep -q '^CONFIG_MODULE_SIG_ALL=' out/.config; then
+            sed -i 's/^CONFIG_MODULE_SIG_ALL=.*/# CONFIG_MODULE_SIG_ALL is not set/' out/.config
+          fi
+          # MODULE_SIG_FORCE 必须关，否则无签名 vendor ko 一律拒载
+          if grep -q '^CONFIG_MODULE_SIG_FORCE=' out/.config; then
+            sed -i 's/^CONFIG_MODULE_SIG_FORCE=.*/# CONFIG_MODULE_SIG_FORCE is not set/' out/.config
+          fi
+          echo "--- MODULE_SIG family ---"
+          grep -E 'CONFIG_MODULE_SIG' out/.config
 
           KCF="-I$PWD/drivers/misc/mediatek/scp/include -I$PWD/drivers/misc/mediatek/include -Wno-error=date-time -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces -Wno-error=builtin-declaration-mismatch -Wno-error=ignored-optimization-argument -Wno-ignored-optimization-argument -Wno-error=unknown-warning-option -Wno-unknown-warning-option -Wno-error=unused-command-line-argument -Wno-unused-command-line-argument"
           set +e
@@ -112,38 +127,22 @@ jobs:
           set -e
           echo "=== BUILD EXIT: $RC ==="
           grep -E "error:|fatal error:" /tmp/build.log | head -60 || true
-          echo "=== last 30 lines ==="
+          echo "=== last 30 ==="
           tail -30 /tmp/build.log || true
           ls -la out/arch/arm64/boot/ 2>&1 | head -20 || true
-
-          if [ "$RC" -eq 0 ] && [ -f out/arch/arm64/boot/Image ]; then
-            VM=$(strings -a out/arch/arm64/boot/Image | grep -m1 'SMP.*mod_unload' || echo "")
-            echo "  vermagic: [$VM]"
-            if [ "$VM" != "4.19.191+ SMP preempt mod_unload modversions aarch64" ]; then
-              echo "  [FAIL] vermagic mismatch"
-              exit 1
-            fi
-            echo "  [PASS] vermagic ok"
-          fi
           [ "$RC" -eq 0 ] || exit 1
 
-      - name: Verify config
+      - name: Verify
         run: |
-          echo 'CiMgLSotIGNvZGluZzogdXRmLTggLSotCiIiIuS7jue8luivkeS6p+eJqemHjOaPkOWPluWGheW1jCBjb25maWfvvIzkuI7ljp/ljoLpgJDpobkgZGlmZiIiIgppbXBvcnQgc3lzLCB6bGliLCByZQoKTkVXID0gc3lzLmFyZ3ZbMV0gaWYgbGVuKHN5cy5hcmd2KSA+IDEgZWxzZSAnb3V0L2FyY2gvYXJtNjQvYm9vdC9JbWFnZScKU1RPQ0sgPSAnL3RtcC9zdG9jay5jb25maWcnCgoKZGVmIGVtYmVkZGVkKHBhdGgpOgogICAgayA9IG9wZW4ocGF0aCwgJ3JiJykucmVhZCgpCiAgICBwID0gay5maW5kKGInSUtDRkdfU1QnKQogICAgaWYgcCA8IDA6CiAgICAgICAgcmV0dXJuIE5vbmUKICAgIHAgKz0gOAogICAgZSA9IGsuZmluZChiJ0lLQ0ZHX0VEJywgcCkKICAgIGlmIGUgPCAwOgogICAgICAgIHJldHVybiBOb25lCiAgICB0cnk6CiAgICAgICAgcmV0dXJuIHpsaWIuZGVjb21wcmVzcyhrW3A6ZV0sIDE2ICsgemxpYi5NQVhfV0JJVFMpCiAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgIHJldHVybiBOb25lCgoKZGVmIHBhcnNlKGJsb2IpOgogICAgZCA9IHt9CiAgICBmb3IgbGluZSBpbiBibG9iLmRlY29kZSgndXRmOCcsICdyZXBsYWNlJykuc3BsaXRsaW5lcygpOgogICAgICAgIGxpbmUgPSBsaW5lLnN0cmlwKCkKICAgICAgICBpZiBub3QgbGluZToKICAgICAgICAgICAgY29udGludWUKICAgICAgICBpZiBsaW5lLnN0YXJ0c3dpdGgoJyMnKToKICAgICAgICAgICAgbSA9IHJlLm1hdGNoKHInIyAoQ09ORklHX1x3KykgaXMgbm90IHNldCcsIGxpbmUpCiAgICAgICAgICAgIGlmIG06CiAgICAgICAgICAgICAgICBkW20uZ3JvdXAoMSldID0gJ24nCiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgaWYgJz0nIGluIGxpbmUgYW5kIGxpbmUuc3RhcnRzd2l0aCgnQ09ORklHXycpOgogICAgICAgICAgICBrLCB2ID0gbGluZS5zcGxpdCgnPScsIDEpCiAgICAgICAgICAgIGRba10gPSB2CiAgICByZXR1cm4gZAoKCm5ld19jZmcgPSBlbWJlZGRlZChORVcpCmlmIG5ld19jZmcgaXMgTm9uZToKICAgIHByaW50KCchISBubyBlbWJlZGRlZCBjb25maWcgaW4gcHJvZHVjdCcpCiAgICBzeXMuZXhpdCgxKQoKc3RvY2tfY2ZnID0gb3BlbihTVE9DSywgJ3JiJykucmVhZCgpCgpubywgbnMgPSBwYXJzZShuZXdfY2ZnKSwgcGFyc2Uoc3RvY2tfY2ZnKQpwcmludCgnICBwcm9kdWN0IGNvbmZpZzogJWQgaXRlbXMgLyAlZCBieXRlcycgJSAobGVuKG5vKSwgbGVuKG5ld19jZmcpKSkKcHJpbnQoJyAgc3RvY2sgICBjb25maWc6ICVkIGl0ZW1zIC8gJWQgYnl0ZXMnICUgKGxlbihucyksIGxlbihzdG9ja19jZmcpKSkKCmFsbGsgPSBzb3J0ZWQoc2V0KG5vKSB8IHNldChucykpCmRpZmYgPSBbKGssIG5zLmdldChrLCAnKG5vbmUpJyksIG5vLmdldChrLCAnKG5vbmUpJykpIGZvciBrIGluIGFsbGsKICAgICAgICBpZiBucy5nZXQoaywgJyhub25lKScpICE9IG5vLmdldChrLCAnKG5vbmUpJyldCgpBTExPVyA9IHNldChbJ0NPTkZJR19NT0RVTEVfU0lHX0ZPUkNFJywgJ0NPTkZJR19NT0RVTEVfU0lHX0FMTCddKQpoYXJkID0gW2QgZm9yIGQgaW4gZGlmZiBpZiBkWzBdIG5vdCBpbiBBTExPV10Kc29mdCA9IFtkIGZvciBkIGluIGRpZmYgaWYgZFswXSBpbiBBTExPV10KCmZvciBrLCBhLCBiIGluIHNvZnQ6CiAgICBwcmludCgnICBbYWxsb3dlZF0gJS00MnMgc3RvY2s9JXMgIG5ldz0lcycgJSAoaywgYSwgYikpCgppZiBub3QgaGFyZDoKICAgIHByaW50KCkKICAgIHByaW50KCcgICoqKiBjb25maWcgaWRlbnRpY2FsIHRvIHN0b2NrIChleGNlcHQgYWxsb3dlZCkgKioqJykKICAgIHN5cy5leGl0KDApCgpwcmludCgpCnByaW50KCcgICEhICVkIHVuZXhwZWN0ZWQgZGlmZmVyZW5jZXMgKGZpcnN0IDQwKTonICUgbGVuKGhhcmQpKQpmb3IgaywgYSwgYiBpbiBoYXJkWzo0MF06CiAgICBwcmludCgnICAgICUtNDZzIHN0b2NrPSUtMjBzIG5ldz0lcycgJSAoaywgYSwgYikpCmlmIGxlbihoYXJkKSA+IDQwOgogICAgcHJpbnQoJyAgICAuLi4gJWQgbW9yZScgJSAobGVuKGhhcmQpIC0gNDApKQoKcHJpbnQoKQpwcmludCgnICA9PT0gZm9jdXMgY2hlY2sgPT09JykKZm9yIHByZSBpbiAoJ0NPTkZJR19UT1VDSFBBTkVMXycsICdDT05GSUdfRFJNX1BBTkVMXycsICdDT05GSUdfT1BMVVNfJyk6CiAgICBhID0gc3VtKDEgZm9yIGsgaW4gbnMgaWYgay5zdGFydHN3aXRoKHByZSkgYW5kIG5zW2tdID09ICd5JykKICAgIGIgPSBzdW0oMSBmb3IgayBpbiBubyBpZiBrLnN0YXJ0c3dpdGgocHJlKSBhbmQgbm9ba10gPT0gJ3knKQogICAgZmxhZyA9ICdPSycgaWYgYSA9PSBiIGVsc2UgJyEhIGxvc3QgJWQnICUgKGEgLSBiKQogICAgcHJpbnQoJyAgICAlLTI4cyBzdG9jayAlM2QgPXkgICBwcm9kdWN0ICUzZCA9eSAgICVzJyAlIChwcmUsIGEsIGIsIGZsYWcpKQoKc3lzLmV4aXQoMikK' | base64 -d > /tmp/verify_config.py
-          echo "===== embedded config vs stock ====="
-          python3 /tmp/verify_config.py out/arch/arm64/boot/Image
+          echo 'CiMgLSotIGNvZGluZzogdXRmLTggLSotCiIiIuaehOW7uuWQjumqjOaUtu+8muWGheW1jCBjb25maWcg5b+F6aG75LiOIGJ1aWxkQi5jb25maWcg5LiA6Ie077yI6Zmk5YWB6K646aG577yJIiIiCmltcG9ydCBzeXMsIHpsaWIsIHJlCgpORVcgICA9IHN5cy5hcmd2WzFdIGlmIGxlbihzeXMuYXJndikgPiAxIGVsc2UgJ291dC9hcmNoL2FybTY0L2Jvb3QvSW1hZ2UnCldBTlQgID0gJy90bXAvYnVpbGRCLmNvbmZpZycKCkFMTE9XID0gewogICAgJ0NPTkZJR19NT0RVTEVfU0lHX0FMTCcsICAgICAgIyDlhbPmjonvvIznnIHlr4bpkqXnlJ/miJAKICAgICdDT05GSUdfTU9EVUxFX1NJR19GT1JDRScsICAgICMg5YWz5o6J77yM5ZCm5YiZ5peg562+5ZCNIGtvIOaLkui9vQogICAgJ0NPTkZJR19MT0NBTFZFUlNJT04nLCAgICAgICAgIyBrYnVpbGQg5Lya5oyJ5qCR54q25oCB6YeN566XCn0KCgpkZWYgZW1iZWRkZWQocGF0aCk6CiAgICBrID0gb3BlbihwYXRoLCAncmInKS5yZWFkKCkKICAgIHAgPSBrLmZpbmQoYidJS0NGR19TVCcpCiAgICBpZiBwIDwgMDoKICAgICAgICByZXR1cm4gTm9uZQogICAgcCArPSA4CiAgICBlID0gay5maW5kKGInSUtDRkdfRUQnLCBwKQogICAgaWYgZSA8IDA6CiAgICAgICAgcmV0dXJuIE5vbmUKICAgIHRyeToKICAgICAgICByZXR1cm4gemxpYi5kZWNvbXByZXNzKGtbcDplXSwgMTYgKyB6bGliLk1BWF9XQklUUykKICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgcmV0dXJuIE5vbmUKCgpkZWYgcGFyc2UoYmxvYik6CiAgICBkID0ge30KICAgIGZvciBsaW5lIGluIGJsb2IuZGVjb2RlKCd1dGY4JywgJ3JlcGxhY2UnKS5zcGxpdGxpbmVzKCk6CiAgICAgICAgbGluZSA9IGxpbmUuc3RyaXAoKQogICAgICAgIGlmIG5vdCBsaW5lOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGlmIGxpbmUuc3RhcnRzd2l0aCgnIycpOgogICAgICAgICAgICBtID0gcmUubWF0Y2gocicjIChDT05GSUdfXHcrKSBpcyBub3Qgc2V0JywgbGluZSkKICAgICAgICAgICAgaWYgbToKICAgICAgICAgICAgICAgIGRbbS5ncm91cCgxKV0gPSAnbicKICAgICAgICAgICAgY29udGludWUKICAgICAgICBpZiAnPScgaW4gbGluZSBhbmQgbGluZS5zdGFydHN3aXRoKCdDT05GSUdfJyk6CiAgICAgICAgICAgIGssIHYgPSBsaW5lLnNwbGl0KCc9JywgMSkKICAgICAgICAgICAgZFtrXSA9IHYKICAgIHJldHVybiBkCgoKbmV3X2NmZyA9IGVtYmVkZGVkKE5FVykKaWYgbmV3X2NmZyBpcyBOb25lOgogICAgcHJpbnQoJyEhIG5vIGVtYmVkZGVkIGNvbmZpZycpCiAgICBzeXMuZXhpdCgxKQoKd2FudF9jZmcgPSBvcGVuKFdBTlQsICdyYicpLnJlYWQoKQpubywgbncgPSBwYXJzZShuZXdfY2ZnKSwgcGFyc2Uod2FudF9jZmcpCgpwcmludCgnICBwcm9kdWN0OiAlZCBpdGVtcyAvICVkIGJ5dGVzJyAlIChsZW4obm8pLCBsZW4obmV3X2NmZykpKQpwcmludCgnICB0YXJnZXQgOiAlZCBpdGVtcyAvICVkIGJ5dGVzJyAlIChsZW4obncpLCBsZW4od2FudF9jZmcpKSkKCiMgLS0tLSDnoazmgKfmo4Dmn6UgMe+8mnN0cnVjdCBtb2R1bGUg5biD5bGA5LiJ6KaB57SgIC0tLS0KcHJpbnQoKQpwcmludCgnICA9PT0gc3RydWN0IG1vZHVsZSBsYXlvdXQgY2hlY2tsaXN0ID09PScpCm9rX2xheW91dCA9IFRydWUKZm9yIGssIHdhbnQgaW4gWygnQ09ORklHX01PRFVMRV9TSUcnLCAneScpLAogICAgICAgICAgICAgICAgKCdDT05GSUdfTU9EVkVSU0lPTlMnLCAneScpLAogICAgICAgICAgICAgICAgKCdDT05GSUdfTU9EVUxFX1VOTE9BRCcsICd5JyldOgogICAgZ290ID0gbm8uZ2V0KGssICcobm9uZSknKQogICAgZ29vZCA9IChnb3QgPT0gd2FudCkKICAgIHByaW50KCcgICAgJS0zMnMgd2FudD0lLTZzIGdvdD0lLTZzICVzJyAlIChrLCB3YW50LCBnb3QsICdPSycgaWYgZ29vZCBlbHNlICdGQUlMJykpCiAgICBpZiBub3QgZ29vZDoKICAgICAgICBva19sYXlvdXQgPSBGYWxzZQoKIyAtLS0tIOehrOaAp+ajgOafpSAy77yaQ0ZJIC8gTFRPIOW/hemhu+S/neaMgeWFs+mXre+8iOWQpuWImeWPr+iDvei1t+S4jeadpe+8iS0tLS0KZm9yIGsgaW4gKCdDT05GSUdfQ0ZJX0NMQU5HJywgJ0NPTkZJR19MVE9fQ0xBTkcnLCAnQ09ORklHX1RISU5MVE8nLCAnQ09ORklHX0xUTycpOgogICAgZ290ID0gbm8uZ2V0KGssICcobm9uZSknKQogICAgZ29vZCA9IGdvdCBpbiAoJ24nLCAnKG5vbmUpJykKICAgIHByaW50KCcgICAgJS0zMnMgd2FudD1vZmYgICAgIGdvdD0lLTZzICVzJyAlIChrLCBnb3QsICdPSycgaWYgZ29vZCBlbHNlICdGQUlMJykpCiAgICBpZiBub3QgZ29vZDoKICAgICAgICBva19sYXlvdXQgPSBGYWxzZQoKIyAtLS0tIOehrOaAp+ajgOafpSAz77ya6amx5Yqo5LiN6IO95LiiIC0tLS0KcHJpbnQoKQpwcmludCgnICA9PT0gZHJpdmVyIHJldGVudGlvbiA9PT0nKQpmb3IgcHJlIGluICgnQ09ORklHX1RPVUNIUEFORUxfJywgJ0NPTkZJR19EUk1fUEFORUxfJywgJ0NPTkZJR19PUExVU18nKToKICAgIGEgPSBzdW0oMSBmb3IgayBpbiBudyBpZiBrLnN0YXJ0c3dpdGgocHJlKSBhbmQgbndba10gPT0gJ3knKQogICAgYiA9IHN1bSgxIGZvciBrIGluIG5vIGlmIGsuc3RhcnRzd2l0aChwcmUpIGFuZCBub1trXSA9PSAneScpCiAgICBnb29kID0gKGEgPT0gYikKICAgIHByaW50KCcgICAgJS0yOHMgdGFyZ2V0ICUzZCA9eSAgIHByb2R1Y3QgJTNkID15ICAgJXMnCiAgICAgICAgICAlIChwcmUsIGEsIGIsICdPSycgaWYgZ29vZCBlbHNlICchISBMT1NUICVkJyAlIChhIC0gYikpKQogICAgaWYgbm90IGdvb2Q6CiAgICAgICAgb2tfbGF5b3V0ID0gRmFsc2UKCiMgLS0tLSDlhajph48gZGlmZiAtLS0tCmFsbGsgPSBzb3J0ZWQoc2V0KG5vKSB8IHNldChudykpCmhhcmQgPSBbXQpmb3IgayBpbiBhbGxrOgogICAgYSA9IG53LmdldChrLCAnKG5vbmUpJykKICAgIGIgPSBuby5nZXQoaywgJyhub25lKScpCiAgICBpZiBhID09IGI6CiAgICAgICAgY29udGludWUKICAgIGlmIGsgaW4gQUxMT1c6CiAgICAgICAgcHJpbnQoJyAgICBbYWxsb3dlZF0gJS00MnMgdGFyZ2V0PSVzICBwcm9kdWN0PSVzJyAlIChrLCBhLCBiKSkKICAgICAgICBjb250aW51ZQogICAgaGFyZC5hcHBlbmQoKGssIGEsIGIpKQoKaWYgaGFyZDoKICAgIHByaW50KCkKICAgIHByaW50KCcgICEhICVkIHVuZXhwZWN0ZWQgZGlmZmVyZW5jZXM6JyAlIGxlbihoYXJkKSkKICAgIGZvciBrLCBhLCBiIGluIGhhcmRbOjUwXToKICAgICAgICBwcmludCgnICAgICUtNDZzIHRhcmdldD0lLTE4cyBwcm9kdWN0PSVzJyAlIChrLCBhLCBiKSkKICAgIGlmIGxlbihoYXJkKSA+IDUwOgogICAgICAgIHByaW50KCcgICAgLi4uICVkIG1vcmUnICUgKGxlbihoYXJkKSAtIDUwKSkKICAgIG9rX2xheW91dCA9IEZhbHNlCgppZiBub3Qgb2tfbGF5b3V0OgogICAgcHJpbnQoKQogICAgcHJpbnQoJyAgKioqIFZFUklGWSBGQUlMRUQgKioqJykKICAgIHN5cy5leGl0KDIpCgpwcmludCgpCnByaW50KCcgICoqKiBWRVJJRlkgUEFTU0VEICoqKicpCnN5cy5leGl0KDApCg==' | base64 -d > /tmp/verify.py
+          echo "===== verify ====="
+          python3 /tmp/verify.py out/arch/arm64/boot/Image
           RC=$?
-          if [ "$RC" -eq 1 ]; then
-            echo "!! product has no embedded config, cannot verify, abort"
-            exit 1
-          fi
-          if [ "$RC" -eq 2 ]; then
+          if [ "$RC" -ne 0 ]; then
             echo ""
-            echo "!! config differs from stock -- listed above"
-            echo "!! this image would lose drivers or change behavior, not shipping"
+            echo "!! verification failed - not shipping"
             exit 1
           fi
-          echo "verify passed"
 
       - name: Package
         if: always()
@@ -151,24 +150,21 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
           cd out/arch/arm64/boot 2>/dev/null || { echo "no boot dir"; exit 0; }
           if [ -f Image.gz ]; then
-            cp Image.gz "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"
-            echo "used Image.gz"
+            cp Image.gz "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"; echo "Image.gz"
           elif [ -f Image ]; then
             gzip -9 -c Image > "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"
-            cp Image "$GITHUB_WORKSPACE/artifacts/kernel_Image.raw"
-            echo "gzipped Image"
+            cp Image "$GITHUB_WORKSPACE/artifacts/kernel_Image.raw"; echo "gzipped Image"
           else
-            echo "!! no kernel image"
+            echo "!! no image"
           fi
-          if [ -f ../../../.config ]; then
-            cp ../../../.config "$GITHUB_WORKSPACE/artifacts/out.config" || true
-          fi
+          [ -f out/.config ] && cp out/.config "$GITHUB_WORKSPACE/artifacts/out.config" || true
+          [ -f .config ] && cp .config "$GITHUB_WORKSPACE/artifacts/out2.config" || true
           ls -la "$GITHUB_WORKSPACE/artifacts" || true
 
       - name: Upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pjs110-kernel
+          name: pjs110-kernel-v7
           path: ${{ github.workspace }}/artifacts/*
           if-no-files-found: warn

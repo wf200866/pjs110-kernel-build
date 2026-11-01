@@ -4,9 +4,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    env:
-      EXP_PURE_STOCK: "0"
-      EXP_NO_TREE_INLINE: "1"
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
@@ -35,426 +32,77 @@ jobs:
           curl -sL -o /tmp/stock.config \
             https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/pjs110_stock.config
           wc -l /tmp/stock.config
+          md5sum /tmp/stock.config
+          echo "  expect md5: 0f002b78ae9aed1f105a923c31212b66"
 
       - name: Toolchain
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq make libncurses-dev flex bison libssl-dev bc \
                                     cpio lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
-          # ★★★ 必须用 clang 11.0.1，和原厂完全一致 ★★★
-          #
-          # 为什么不能用 GCC：
-          #   原厂 config: CONFIG_CC_IS_CLANG=y / CONFIG_CFI_CLANG=y / CONFIG_LTO_CLANG=y
-          #   struct module 里有：
-          #       #ifdef CONFIG_CFI_CLANG
-          #           cfi_check_fn cfi_check;
-          #       #endif
-          #   GCC 不支持 CFI，这个字段消失 → struct module 布局变 → CRC 变
-          #
-          #   实测：GCC 编出来 module_layout CRC = 0xa11ea8b9
-          #         设备 10 个 vendor .ko 期望   = 0xddfea5da
-          #         不一致 → "disagrees about version of symbol module_layout"
-          #         → WiFi / 蓝牙 / GPS / FM / fpsgo 全部加载失败
-          #
-          #   CC_IS_CLANG 是 kbuild 探测编译器得出的，写进 config 没用，必须真的换编译器
-          #
-          # AOSP clang-r383902 = clang 11.0.1，正是原厂 CONFIG_CLANG_VERSION=110001
           set -e
           CLANG_DIR="$HOME/clang-r383902"
           rm -rf "$CLANG_DIR"
-          echo "  获取 clang 11.0.1 (r383902)..."
-          # 优先 git shallow clone（archive 对大仓库容易超时）
+          echo "  fetch clang 11.0.1 (r383902)..."
           if git clone --depth 1 --branch lineage-20 \
                https://github.com/Jacksonzwang/android_prebuilts_clang_kernel_linux-x86_clang-r383902.git \
                "$CLANG_DIR" 2>&1 | tail -3; then
-            echo "  [ok] clone 完成"
+            echo "  [ok] clone done"
           else
-            echo "  [!!] clone 失败，试 tarball"
-            mkdir -p "$CLANG_DIR"
-            curl -sL --max-time 600 -o /tmp/clang.tar.gz \
-              "https://github.com/Jacksonzwang/android_prebuilts_clang_kernel_linux-x86_clang-r383902/archive/refs/heads/lineage-20.tar.gz"
-            tar xzf /tmp/clang.tar.gz -C "$CLANG_DIR" --strip-components=1
+            echo "  [warn] clone failed, fallback to system clang"
+            CLANG_DIR=""
           fi
-          ls "$CLANG_DIR/bin/clang" || { echo "!! 找不到 bin/clang"; exit 1; }
-          "$CLANG_DIR/bin/clang" --version || { echo "!! clang 跑不起来"; exit 1; }
-          echo "CLANG_DIR=$CLANG_DIR" >> "$GITHUB_ENV"
-          echo "  [ok] clang 就位: $CLANG_DIR"
+          if [ -n "$CLANG_DIR" ]; then
+            echo "$CLANG_DIR/bin" >> $GITHUB_PATH
+          fi
 
-      - name: Patch OPPO source defects
+      - name: Patch kernel source
         run: |
           set -u
-          V="$(dirname "$GITHUB_WORKSPACE")/vendor"
+          cd "$GITHUB_WORKSPACE"
           fail=0
-          ok()  { if [ "$1" = "0" ]; then echo "  [ok]   $2"; else echo "  [FAIL] $2"; fail=1; fi; }
-          echo "===== A. fs/proc/Kconfig ====="
-          sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
-          ok $? "去掉 cpu_jankinfo 引用"
 
-          # ★★★ A2. 让版本校验无条件放行（核心修复）★★★
-          #
-          # 硬事实（已逐项实测确认）：
-          #   struct module 布局 原厂 == 新编：init=0x180 exit=0x3a0 size=1024
-          #   vermagic 一字不差：4.19.191+ SMP preempt mod_unload modversions aarch64
-          #   编译器一致：clang 11.0.1 (r383902)
-          #   纯原厂 config 编译，CRC 仍是 0xf3c0b168（原厂 0xddfea5da）
-          #   → 差异来自 genksyms 对类型文本的解析，原厂树的私有 patch 不可得
-          #
-          # 结论：布局一致、符号名一致，唯一不匹配的是版本号这个数字。
-          #      跳过数字比对即可。不改变任何内存访问路径。
-          MODC="kernel/module.c"
-          if [ -f "$MODC" ]; then
-            cp "$MODC" /tmp/module.c.orig
-            echo 'IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiLorqkga2VybmVsL21vZHVsZS5jIOeahOeJiOacrOagoemqjOaXoOadoeS7tuaUvuihjOOAggoK5L6d5o2u77yI5YWo6YOo57uP5a6e5rWL56Gu6K6k77yJ77yaCiAgc3RydWN0IG1vZHVsZSDluIPlsYAgIOWOn+WOgiA9PSDmlrDnvJYgICAgaW5pdD0weDE4MCBleGl0PTB4M2EwIHNpemU9MTAyNAogIHZlcm1hZ2ljICAgICAgICAgICAg5LiA5a2X5LiN5beuICA0LjE5LjE5MSsgU01QIHByZWVtcHQgbW9kX3VubG9hZCBtb2R2ZXJzaW9ucyBhYXJjaDY0CiAg57yW6K+R5ZmoICAgICAgICAgICAgICBjbGFuZyAxMS4wLjEgKHIzODM5MDIpIOWPjOaWueS4gOiHtAogIOe6r+WOn+WOgiBjb25maWcg57yW6K+RICBDUkMg5LuN5pivIDB4ZjNjMGIxNjjvvIjljp/ljoIgMHhkZGZlYTVkYe+8iQogIOKGkiDlt67lvILlj6rmnaXoh6ogZ2Vua3N5bXMg5a+557G75Z6L5paH5pys55qE6Kej5p6Q77yM5Y6f5Y6C56eB5pyJIHBhdGNoIOS4jeWPr+W+lwoK5biD5bGA5LiA6Ie077yM56ym5Y+35ZCN5LiA6Ie077yM5ZSv5LiA5LiN5Yy56YWN55qE5piv54mI5pys5Y+35pWw5a2X5pys6Lqr44CCCui3s+i/h+aVsOWtl+avlOWvueS4jeaUueWPmOS7u+S9leWGheWtmOiuv+mXrui3r+W+hO+8mnZlbmRvciBrbyDmjInoh6rlt7HnmoTnu5PmnoTkvZPnkIbop6Porr/pl67lhoXmoLjvvIwK6ICM6YKj5Lu955CG6Kej5ZKM5paw5YaF5qC455qE5a6e6ZmF5biD5bGA6YCQ5a2X5q6155u45ZCM77yI6YeN5a6a5L2N5YGP56e75a6e5rWL5LiA6Ie077yJ44CCCgrlj6rlnKggI2lmZGVmIENPTkZJR19NT0RWRVJTSU9OUyDliIbmlK/lhoXmlLnlhpnvvIwjZWxzZSDliIbmlK/kv53mjIHljp/moLfjgIIKIiIiCgppbXBvcnQgc3lzCgpUQUcgPSAnT1BQT19BMlhfVkVORE9SX0tPX0JZUEFTUycKCgpkZWYgbWFpbihwYXRoKToKICAgIHMgPSBvcGVuKHBhdGgsIGVuY29kaW5nPSd1dGYtOCcsIGVycm9ycz0nc3Vycm9nYXRlZXNjYXBlJykucmVhZCgpCgogICAgaWYgVEFHIGluIHM6CiAgICAgICAgcHJpbnQoJyAgW3NraXBdIOW3suaJk+i/h+ihpeS4gScpCiAgICAgICAgcmV0dXJuIDAKCiAgICBhbmNob3JfaWZkZWYgPSAnI2lmZGVmIENPTkZJR19NT0RWRVJTSU9OU1xuJwogICAgaWYgYW5jaG9yX2lmZGVmIG5vdCBpbiBzOgogICAgICAgIHByaW50KCcgIFtGQUlMXSDmib7kuI3liLAgI2lmZGVmIENPTkZJR19NT0RWRVJTSU9OUycpCiAgICAgICAgcmV0dXJuIDEKICAgIGIwID0gcy5pbmRleChhbmNob3JfaWZkZWYpCgogICAgIyAtLS0tIDEuIGNoZWNrX3ZlcnNpb24gLS0tLQogICAga2V5ID0gJ3N0YXRpYyBpbnQgY2hlY2tfdmVyc2lvbihjb25zdCBzdHJ1Y3QgbG9hZF9pbmZvICppbmZvJwogICAgaWYga2V5IG5vdCBpbiBzOgogICAgICAgIHByaW50KCcgIFtGQUlMXSDmib7kuI3liLAgY2hlY2tfdmVyc2lvbicpCiAgICAgICAgcmV0dXJuIDEKICAgIGkgPSBzLmluZGV4KGtleSwgYjApCiAgICBqID0gcy5pbmRleCgnXG5iYWRfdmVyc2lvbjonLCBpKQogICAgYm9keSA9IHNbaTpqXQoKICAgIG1hcmtlciA9ICdcdHN0cnVjdCBtb2R2ZXJzaW9uX2luZm8gKnZlcnNpb25zO1xuJwogICAgaWYgbWFya2VyIG5vdCBpbiBib2R5OgogICAgICAgIHByaW50KCcgIFtGQUlMXSBjaGVja192ZXJzaW9uIOmHjOaJvuS4jeWIsOmUmueCuScpCiAgICAgICAgcmV0dXJuIDEKICAgIGJvZHkgPSBib2R5LnJlcGxhY2UoCiAgICAgICAgbWFya2VyLAogICAgICAgIG1hcmtlciArICdcblx0LyogJXM6IOW4g+WxgOW3suWunua1i+S4gOiHtO+8jOeJiOacrOWPt+avlOWvuei3s+i/hyAqL1xuXHRyZXR1cm4gMTtcbicgJSBUQUcsCiAgICAgICAgMSwKICAgICkKICAgIHMgPSBzWzppXSArIGJvZHkgKyBzW2o6XQogICAgcHJpbnQoJyAgW29rXSAgIGNoZWNrX3ZlcnNpb24g5pS55Li65peg5p2h5Lu25pS+6KGMJykKCiAgICAjIC0tLS0gMi4gY2hlY2tfbW9kc3RydWN0X3ZlcnNpb27vvIjlkIzkuIDljLrlnZflhoXvvIzlj4zkv53pmanvvIktLS0tCiAgICBrZXkyID0gJ3N0YXRpYyBpbmxpbmUgaW50IGNoZWNrX21vZHN0cnVjdF92ZXJzaW9uKGNvbnN0IHN0cnVjdCBsb2FkX2luZm8gKmluZm8sJwogICAgYjEgPSBzLmluZGV4KGFuY2hvcl9pZmRlZikKICAgIGUxID0gcy5pbmRleCgnXG4jZWxzZScsIGIxKQogICAgc2VnX3N0YXJ0ID0gcy5pbmRleChrZXkyLCBiMSkKICAgIGlmIHNlZ19zdGFydCA8IGUxOgogICAgICAgIHNlZ19lbmQgPSBzLmluZGV4KCdcbn1cbicsIHNlZ19zdGFydCkgKyAzCiAgICAgICAgbmV3ID0gKAogICAgICAgICAgICBrZXkyICsgJ1xuJwogICAgICAgICAgICAnXHRcdFx0XHRcdCAgc3RydWN0IG1vZHVsZSAqbW9kKVxuJwogICAgICAgICAgICAne1xuJwogICAgICAgICAgICAnXHQvKiAlczog5ZCM5LiKICovXG4nCiAgICAgICAgICAgICdcdHJldHVybiAxO1xuJwogICAgICAgICAgICAnfVxuJyAlIFRBRwogICAgICAgICkKICAgICAgICBzID0gc1s6c2VnX3N0YXJ0XSArIG5ldyArIHNbc2VnX2VuZDpdCiAgICAgICAgcHJpbnQoJyAgW29rXSAgIGNoZWNrX21vZHN0cnVjdF92ZXJzaW9uIOebtOaOpei/lOWbniAxJykKCiAgICBvcGVuKHBhdGgsICd3JywgZW5jb2Rpbmc9J3V0Zi04JywgZXJyb3JzPSdzdXJyb2dhdGVlc2NhcGUnKS53cml0ZShzKQogICAgcmV0dXJuIDAKCgppZiBfX25hbWVfXyA9PSAnX19tYWluX18nOgogICAgc3lzLmV4aXQobWFpbihzeXMuYXJndlsxXSkp' | base64 -d > /tmp/patch_modver.py
-            python3 -c "import ast;ast.parse(open('/tmp/patch_modver.py').read())" \
-              && echo "  [ok]   patch_modver.py 语法 OK"
-            python3 /tmp/patch_modver.py "$MODC" || { echo "  [FAIL] 版本校验补丁失败"; fail=1; }
-            echo "  --- 修后 ---"
-            sed -n "/#ifdef CONFIG_MODVERSIONS/,/^#else/p" "$MODC" \
-              | sed -n '/static int check_version/,/^bad_version:/p' | head -14
-          else
-            echo "  [FAIL] 缺 $MODC"; fail=1
-          fi
-
-
-          echo "===== B. core 头文件 inline 声明（可跳过） ====="
-          if [ "${EXP_NO_TREE_INLINE:-0}" = "1" ]; then
-            echo "  ★★ 跳过：不改内核核心头文件 ★★"
-          else
-            sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h 2>/dev/null || true
-            sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h 2>/dev/null || true
-            sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h 2>/dev/null || true
-            sed -i 's/^inline void blk_crypto_flock/extern void blk_crypto_flock/' include/linux/blk-crypto.h 2>/dev/null || true
-          fi
-
-          echo "===== C0. 通用 inline 降级（仅 vendor） ====="
-          echo 'aW1wb3J0IHJlLCBvcywgc3lzCgojIOmAmueUqCBpbmxpbmUg6ZmN57qn5ZmoCiMg6Kej5YazIGdudTg5L0M5OSBpbmxpbmUg6K+t5LmJ5re355So5a+86Ie055qE77yaCiMgICAiaW5saW5pbmcgZmFpbGVkIGluIGNhbGwgdG8gJ2Fsd2F5c19pbmxpbmUnIFhYWDogZnVuY3Rpb24gYm9keSBub3QgYXZhaWxhYmxlIgojCiMg6KeE5YiZ77yI5L+d5a6I77yM5LuF5Lik57G777yJ77yaCiMgICAxKSDlpLTmlofku7bnuq/lo7DmmI7vvJogIFtleHRlcm5dIGlubGluZSBUWVBFIGZuKGFyZ3MpOyAgLT4gIGV4dGVybiBUWVBFIGZuKGFyZ3MpOwojICAgMikgLmMg5paH5Lu25a6a5LmJ77yaICAgaW5saW5lIFRZUEUgZm4oYXJncykgeyAgICAgICAgIC0+ICBUWVBFIGZuKGFyZ3MpIHsKIyDkuI3liqjvvJoKIyAgIC0gc3RhdGljIGlubGluZe+8iOWktOaWh+S7tuecnyBpbmxpbmXvvIzlronlhajvvIkKIyAgIC0g5aS05paH5Lu26YeM5bim5Ye95pWw5L2T55qEIGlubGluZe+8iOaUueS6huS8mumHjeWkjeWumuS5ie+8iQojICAgLSDlkKsgX19hdHRyaWJ1dGVfXyDnmoTooYwKCkRFQ0wgPSByZS5jb21waWxlKHInXihccyopKD86ZXh0ZXJuXHMrKT9pbmxpbmVccysoW0EtWmEtel9dW1x3IFx0XCpdKj8pXGIoXHcrKVxzKlwoKFteO10qKVwpXHMqO1xzKiQnKQpERUYgPSByZS5jb21waWxlKHInXihccyopaW5saW5lXHMrKFtBLVphLXpfXVtcdyBcdFwqXSo/KVxiKFx3KylccypcKChbXildKilcKVxzKihceyk/XHMqJCcpClNLSVAgPSB7J21haW4nfQoKCmRlZiBwcm9jZXNzKHBhdGgsIGlzX2hlYWRlcik6CiAgICB0cnk6CiAgICAgICAgbGluZXMgPSBvcGVuKHBhdGgsIGVuY29kaW5nPSd1dGYtOCcsIGVycm9ycz0nc3Vycm9nYXRlZXNjYXBlJykucmVhZGxpbmVzKCkKICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgcmV0dXJuIDAKICAgIGNoYW5nZWQsIG91dCA9IDAsIFtdCiAgICBmb3IgbG4gaW4gbGluZXM6CiAgICAgICAgcyA9IGxuLmxzdHJpcCgpCiAgICAgICAgaWYgcy5zdGFydHN3aXRoKCdzdGF0aWMgJykgb3IgJ3N0YXRpYyBpbmxpbmUnIGluIGxuOgogICAgICAgICAgICBvdXQuYXBwZW5kKGxuKQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGlmIHJlLm1hdGNoKHInXlxzKiMnLCBsbikgb3IgJ19fYXR0cmlidXRlX18nIGluIGxuOgogICAgICAgICAgICBvdXQuYXBwZW5kKGxuKQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIG0gPSBERUNMLm1hdGNoKGxuKQogICAgICAgIGlmIG0gYW5kIGlzX2hlYWRlcjoKICAgICAgICAgICAgaW5kLCB0eXAsIG5hbWUsIGFyZ3MgPSBtLmdyb3VwcygpCiAgICAgICAgICAgIGlmIG5hbWUgaW4gU0tJUDoKICAgICAgICAgICAgICAgIG91dC5hcHBlbmQobG4pCiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICBuZXdsaW5lID0gaW5kICsgJ2V4dGVybiAnICsgdHlwLnN0cmlwKCkgKyAnICcgKyBuYW1lICsgJygnICsgYXJncyArICcpOycgKyAnXG4nCiAgICAgICAgICAgIG91dC5hcHBlbmQobmV3bGluZSkKICAgICAgICAgICAgY2hhbmdlZCArPSAxCiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgbSA9IERFRi5tYXRjaChsbikKICAgICAgICBpZiBtIGFuZCBub3QgaXNfaGVhZGVyOgogICAgICAgICAgICBpbmQsIHR5cCwgbmFtZSwgYXJncywgYnIgPSBtLmdyb3VwcygpCiAgICAgICAgICAgIGlmIG5hbWUgaW4gU0tJUDoKICAgICAgICAgICAgICAgIG91dC5hcHBlbmQobG4pCiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICBuZXdsaW5lID0gaW5kICsgdHlwLnN0cmlwKCkgKyAnICcgKyBuYW1lICsgJygnICsgYXJncyArICcpJwogICAgICAgICAgICBpZiBicjoKICAgICAgICAgICAgICAgIG5ld2xpbmUgKz0gJyB7JwogICAgICAgICAgICBuZXdsaW5lICs9ICdcbicKICAgICAgICAgICAgb3V0LmFwcGVuZChuZXdsaW5lKQogICAgICAgICAgICBjaGFuZ2VkICs9IDEKICAgICAgICAgICAgY29udGludWUKICAgICAgICBvdXQuYXBwZW5kKGxuKQogICAgaWYgY2hhbmdlZDoKICAgICAgICBvcGVuKHBhdGgsICd3JywgZW5jb2Rpbmc9J3V0Zi04JywgZXJyb3JzPSdzdXJyb2dhdGVlc2NhcGUnKS53cml0ZWxpbmVzKG91dCkKICAgIHJldHVybiBjaGFuZ2VkCgoKZGVmIHdhbGsocm9vdHMpOgogICAgdG90LCBmaWxlcyA9IDAsIDAKICAgIGZvciByb290IGluIHJvb3RzOgogICAgICAgIGlmIG5vdCBvcy5wYXRoLmlzZGlyKHJvb3QpOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGZvciBkcCwgZG4sIGZucyBpbiBvcy53YWxrKHJvb3QpOgogICAgICAgICAgICBkbls6XSA9IFtkIGZvciBkIGluIGRuIGlmIGQgIT0gJy5naXQnXQogICAgICAgICAgICBmb3IgZm4gaW4gZm5zOgogICAgICAgICAgICAgICAgaWYgZm4uZW5kc3dpdGgoJy5oJyk6CiAgICAgICAgICAgICAgICAgICAgbiA9IHByb2Nlc3Mob3MucGF0aC5qb2luKGRwLCBmbiksIFRydWUpCiAgICAgICAgICAgICAgICBlbGlmIGZuLmVuZHN3aXRoKCcuYycpOgogICAgICAgICAgICAgICAgICAgIG4gPSBwcm9jZXNzKG9zLnBhdGguam9pbihkcCwgZm4pLCBGYWxzZSkKICAgICAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgICAgIGlmIG46CiAgICAgICAgICAgICAgICAgICAgdG90ICs9IG4KICAgICAgICAgICAgICAgICAgICBmaWxlcyArPSAxCiAgICAgICAgICAgICAgICAgICAgcHJpbnQoJyAgJyArIHN0cihuKSArICcgICcgKyBvcy5wYXRoLmpvaW4oZHAsIGZuKSkKICAgIHByaW50KCcgIOWQiOiuoSAnICsgc3RyKHRvdCkgKyAnIOWkhCAvICcgKyBzdHIoZmlsZXMpICsgJyDmlofku7YnKQogICAgcmV0dXJuIHRvdAoKCmlmIF9fbmFtZV9fID09ICdfX21haW5fXyc6CiAgICB3YWxrKHN5cy5hcmd2WzE6XSk=' | base64 -d > /tmp/inline_fix.py
-          python3 -c "import ast,sys; ast.parse(open('/tmp/inline_fix.py').read())" && echo "  [ok]   inline_fix.py 语法 OK"
-          # ★★★ 关键：绝不碰内核核心树 ★★★
-          #   genksyms 算 CRC 靠的是类型/原型解析。
-          #   把 include/linux/*.h、mm.h、sched.h 里的 inline 全降级成 extern，
-          #   符号表会被整体改动 → 大批符号 CRC 变化（实测 129 个 vendor 符号不匹配）
-          #   内核主干里那些 inline 原厂也是这么编的，必须原样保留。
-          if [ "${EXP_NO_TREE_INLINE:-0}" = "1" ]; then
-            echo "  ★★ 跳过内核树 inline 降级 ★★"
-          fi
-          echo "--- 内核树：不动 ---"
-          echo "  [skip] 保留内核树全部 inline 原样（genksyms CRC 稳定）"
-          echo "--- vendor ---"
-          python3 /tmp/inline_fix.py "$V" 2>&1 | tail -50 || true
-          echo "--- 残留 ^extern inline ---"
-          echo -n "vendor: "; grep -rn '^extern inline' "$V" --include=*.h --include=*.c 2>/dev/null | wc -l
-
-          echo "===== C1. sensor_devinfo.c 空参数 ====="
-          SDI="$V/oplus/sensor/kernel/oplus_sensor_devinfo/sensor_devinfo.c"
-          if [ -f "$SDI" ]; then
-            sed -i 's/^__attribute__((weak)) int register_lcdinfo_notifier() {/__attribute__((weak)) int register_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
-            sed -i 's/^__attribute__((weak)) int unregister_lcdinfo_notifier() {/__attribute__((weak)) int unregister_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
-            ok $? "sensor_devinfo.c 补原型"
-            grep -n 'lcdinfo_notifier' "$SDI" | head -6
-          else
-            echo "  [FAIL] 缺 $SDI"; fail=1
-          fi
-          SDI2="$V/oplus/sensor/kernel/sensorhub/oplus_sensor_devinfo/sensor_devinfo.c"
-          [ -f "$SDI2" ] && {
-            sed -i 's/^__attribute__((weak)) int register_lcdinfo_notifier() {/__attribute__((weak)) int register_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI2"
-            sed -i 's/^__attribute__((weak)) int unregister_lcdinfo_notifier() {/__attribute__((weak)) int unregister_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI2"
-            echo "  [ok]   sensorhub 版同步"
-          }
-
-          echo "===== D. 其他 ====="
-          # is_key_process: 内核树 signal.c 调用它，但 vendor 里是 static（内部链接）
-          # stability_helper 是外部模块(KBUILD_OPTIONS=m)，不会进 vmlinux
-          # 最省事：在 oppo_process.h 里提供 static inline 实现（只用于打日志）
-          PROC_H="include/soc/oplus/system/oppo_process.h"
-          if [ -L "$PROC_H" ]; then rm -f "$PROC_H"; fi
-          printf '%s\n' \
-            '#ifndef _OPPO_PROCESS_H_' \
-            '#define _OPPO_PROCESS_H_' \
-            '#include <linux/types.h>' \
-            '#include <linux/sched.h>' \
-            '#include <linux/pid.h>' \
-            '#include <linux/string.h>' \
-            'static inline bool is_key_process(struct task_struct *t)' \
-            '{' \
-            '	if (!t) return false;' \
-            '	if (!strcmp(t->comm, "init") || !strcmp(t->comm, "system_server")' \
-            '	    || !strcmp(t->comm, "surfaceflinger")' \
-            '	    || !strcmp(t->comm, "servicemanager"))' \
-            '		return true;' \
-            '	return false;' \
-            '}' \
-            'static inline bool oppo_is_android_core_group(struct pid *pgrp) { return false; }' \
-            '#endif' > "$PROC_H"
-          ok $? "oppo_process.h 提供 static inline is_key_process"
-          grep -c 'is_key_process' "$PROC_H"
-          SY="$V/oplus/kernel/charger/v1/voocphy/oplus_sy6529.c"
-          [ -f "$SY" ] && {
-            sed -i 's/if (\*data == sy6529_CHARGE_MODE_2_1 | \*data == sy6529_CHARGE_MODE_1_1)/if ((*data == sy6529_CHARGE_MODE_2_1) | (*data == sy6529_CHARGE_MODE_1_1))/' "$SY"
-            ok $? "sy6529 括号"
-          }
-          TP="$V/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"
-          if [ -f "$TP" ] && ! grep -q TP_VXN "$TP"; then
-            sed -i 's/^    TP_TXD,/    TP_TXD,\n    TP_VXN,/' "$TP"
-            ok $? "tp_devices.h 补 TP_VXN"
-          fi
-
-          echo "===== E. 头部 + 编译挂载 ====="
-          mkdir -p include/soc/oplus/system
-          # oppo_process.h 已在 D 段生成（含 static inline is_key_process），此处不再覆盖
-          # --- 根因：drivers/soc/oplus/Makefile 是 0 字节空文件 ---
-          # drivers/soc/oplus/system -> vendor/oplus/kernel/system 链接已存在
-          # 但空 Makefile 导致 system/ 从不被递归，oplus_project 永远编不进去
-          SOCMK="drivers/soc/oplus/Makefile"
-          echo "  --- 修前 ---"; cat "$SOCMK" 2>/dev/null; echo "[EOF]"
-          # drivers/soc/Makefile 已有 obj-y += oplus/system/，此处无需再加 system/
-          # 保留原内容，只在缺失时补 healthinfo（原文件本来就该有）
-          if ! grep -q 'healthinfo/' "$SOCMK" 2>/dev/null; then
-            printf 'obj-y += healthinfo/\n' >> "$SOCMK"
-          fi
-          echo "  --- 修后 ---"; cat "$SOCMK"; echo "[EOF]"
-
-          # ★ 根因：system/Kconfig 没 source 子模块的 Kconfig
-          # 导致 CONFIG_OPLUS_FEATURE_OPROJECT / CONFIG_OPLUS_FEATURE_FEEDBACK
-          # 都是未声明 symbol，写进 .config 会被丢弃 → 对应 .o 不编译 → undefined reference
-          SYSKC="drivers/soc/oplus/system/Kconfig"
-          echo "  --- $SYSKC 修前 ---"; tail -3 "$SYSKC" 2>/dev/null; echo "[EOF]"
-          if [ -f "$SYSKC" ]; then
-            # 遍历 system/ 下所有子目录 Kconfig，缺谁补谁
-            ADDED=0
-            for sub in $(ls -d drivers/soc/oplus/system/*/ 2>/dev/null); do
-              name=$(basename "$sub")
-              [ -f "$sub/Kconfig" ] || continue
-              rel="drivers/soc/oplus/system/$name/Kconfig"
-              if ! grep -q "$rel" "$SYSKC"; then
-                printf 'source "%s"\n' "$rel" >> "$SYSKC"
-                echo "  [ok]   补 source $rel"
-                ADDED=$((ADDED+1))
-              fi
-            done
-            echo "  共补 $ADDED 条 source"
-            ok 0 "system/Kconfig 补齐子模块"
-          else
-            echo "  [FAIL] 缺 $SYSKC"; fail=1
-          fi
-          echo "  --- 修后（全部 source 行）---"
-          grep -n 'source' "$SYSKC" | head -40
-          # 关键 symbol 校验
-          for sym in OPLUS_FEATURE_OPROJECT OPLUS_FEATURE_FEEDBACK; do
-            if grep -rq "config $sym" drivers/soc/oplus/system/ 2>/dev/null; then
-              echo "  [ok]   $sym 已定义"
-            else
-              echo "  [FAIL] $sym 未定义"; fail=1
-            fi
-          done
-          test -d drivers/soc/oplus/system/oplus_project \
-            && echo "  [ok]   system/oplus_project 可访问" \
-            || { echo "  [FAIL] system/oplus_project 不存在"; fail=1; }
-          test -f drivers/soc/oplus/system/Makefile \
-            && echo "  [ok]   system/Makefile 存在（内含 OPROJECT 分支）" \
-            || { echo "  [FAIL] system/Makefile 缺失"; fail=1; }
-          # 两个头文件名字都链到 vendor 真头文件
-          rm -f include/soc/oplus/system/oppo_project.h
-          SRC_PJ="$V/oplus/kernel/boot/include/oplus_project.h"
-          [ -f "$SRC_PJ" ] || SRC_PJ="$V/oplus/kernel/system/include/oplus_project.h"
-          if [ -f "$SRC_PJ" ]; then
-            ln -sf "$SRC_PJ" include/soc/oplus/system/oplus_project.h
-            ln -sf "$SRC_PJ" include/soc/oplus/system/oppo_project.h
-            echo "  [ok]   两个名字链到 $(basename $(dirname $(dirname $SRC_PJ)))/include/oplus_project.h"
-          else
-            echo "  [FAIL] 找不到 vendor 的 oplus_project.h"; fail=1
-          fi
-          [ -f include/scp.h ] || printf '%s\n' '#ifndef _SCP_FORWARD_H_' \
-            '#define _SCP_FORWARD_H_' \
-            '#include <../drivers/misc/mediatek/scp/include/scp.h>' \
-            '#endif' > include/scp.h
-          ok $? "桩头文件处理"
-
-          echo "===== F. -Werror -> -Wno-error ====="
+          echo "===== A. generic build fixes ====="
           grep -rl -- "-Werror" --include=Makefile --include=Kbuild --include="*.mk" . 2>/dev/null | while read -r f; do
             sed -i 's/-Werror=/-Wno-error=/g; s/-Werror-\([A-Za-z0-9_-]*\)/-Wno-error=\1/g; s/\(^\|[[:space:]]\)-Werror\([[:space:]]\|$\)/\1-Wno-error\2/g' "$f"
           done
-          echo "  剩余 -Werror: $(grep -rn -- '-Werror' --include=Makefile . 2>/dev/null | wc -l)"
+          for f in $(grep -rl -- '-fmerge-constants' . --include=Makefile --include='*.mk' --include=Kbuild 2>/dev/null); do
+            sed -i 's/-fmerge-constants//g' "$f"
+          done
+          echo "  [ok] warnings downgraded"
 
-          echo "===== G. config ====="
-          cp /tmp/stock.config out.config
-          # ★ 致命项：原厂 vermagic 是 "4.19.191+"（带一个加号）
-          # 这个 + 是 kbuild 检测到 git 树脏（有本地改动）时自动追加的
-          # 我们整个 patch 流程都在改源码，树一定是脏的 → 会自动得到 +
-          # 所以 CONFIG_LOCALVERSION 必须留空，绝不能手动写 "+"
-          #   LOCALVERSION="" + 脏树 → "4.19.191+"   正确
-          #   LOCALVERSION="+" + 脏树 → "4.19.191++" 错误（实测过，会变砖）
-          #   LOCALVERSION="" + 干净树 → "4.19.191"  错误（上次不开机的原因）
-          if grep -q '^CONFIG_LOCALVERSION=' out.config; then
-            sed -i 's|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=""|' out.config
-          else
-            printf 'CONFIG_LOCALVERSION=""\n' >> out.config
-          fi
-          grep -n '^CONFIG_LOCALVERSION' out.config
-          echo "  [ok]   LOCALVERSION 留空，由脏树自动追加 +"
-          # ★★★ 核心修复：把原厂所有 =y 的项强制恢复 ★★★
-          #
-          # 现象：42 个原厂 =y 的项在编译产物里变成了 N
-          #   其中包括 CONFIG_TOUCHPANEL_SYNAPTICS_TD4160（触摸驱动！）
-          #   以及一大批 CONFIG_OPLUS_FEATURE_* / CONFIG_MTK_*
-          #
-          # 根因：这些 symbol 所在的 Kconfig 没有被 source，autoconf 直接丢弃
-          #
-          # 后果：不只丢功能，还改 CRC —— 这些特性会通过头文件影响结构体定义
-          #   （例如给 struct device_node 加字段），而 genksyms 算 CRC 时会把
-          #   结构体完整展开。字段少了 → CRC 变 → vendor ko 全部拒载。
-          #
-          # 这就是 module_layout / of_* / cfg80211_* 那 129 个符号 CRC 不匹配的真正原因
-          echo "  --- 恢复原厂 =y 项 ---"
-          echo 'CmltcG9ydCByZQpkZWYgbG9hZChwKToKICAgIGQgPSB7fQogICAgZm9yIGwgaW4gb3BlbihwLCBlcnJvcnM9J3JlcGxhY2UnKToKICAgICAgICBzID0gbC5yc3RyaXAoKQogICAgICAgIG0gPSByZS5tYXRjaChyJ14oQ09ORklHX1tBLVphLXowLTlfXSspPSguKikkJywgcykKICAgICAgICBpZiBtOgogICAgICAgICAgICBkW20uZ3JvdXAoMSldID0gbS5ncm91cCgyKQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIG0gPSByZS5tYXRjaChyJ14jIChDT05GSUdfW0EtWmEtejAtOV9dKykgaXMgbm90IHNldCQnLCBzKQogICAgICAgIGlmIG06CiAgICAgICAgICAgIGRbbS5ncm91cCgxKV0gPSAnbicKICAgIHJldHVybiBkCgphID0gbG9hZCgnL3RtcC9zdG9jay5jb25maWcnKQpiID0gbG9hZCgnb3V0LmNvbmZpZycpCmxvc3QgPSBbayBmb3IgayBpbiBhIGlmIGFba10gPT0gJ3knIGFuZCBiLmdldChrKSAhPSAneSddCnByaW50KCcgIHN0b2NrPXkgYnV0IG5vdyE9eTogJWQnICUgbGVuKGxvc3QpKQpsaW5lcyA9IG9wZW4oJ291dC5jb25maWcnLCBlcnJvcnM9J3JlcGxhY2UnKS5yZWFkKCkuc3BsaXRsaW5lcyhUcnVlKQpwcmVzZW50ID0gc2V0KCkKZml4ZWQgPSAwCmZvciBpLCBsIGluIGVudW1lcmF0ZShsaW5lcyk6CiAgICBtID0gcmUubWF0Y2gocideKD86IyApPyhDT05GSUdfW0EtWmEtejAtOV9dKykoPzo9fCBpcyBub3Qgc2V0KScsIGwpCiAgICBpZiBtOgogICAgICAgIGsgPSBtLmdyb3VwKDEpCiAgICAgICAgcHJlc2VudC5hZGQoaykKICAgICAgICBpZiBrIGluIGxvc3Q6CiAgICAgICAgICAgIGxpbmVzW2ldID0gayArICc9eVxuJwogICAgICAgICAgICBmaXhlZCArPSAxCmFwID0gMApmb3IgayBpbiBsb3N0OgogICAgaWYgayBub3QgaW4gcHJlc2VudDoKICAgICAgICBsaW5lcy5hcHBlbmQoayArICc9eVxuJykKICAgICAgICBhcCArPSAxCm9wZW4oJ291dC5jb25maWcnLCAndycpLndyaXRlbGluZXMobGluZXMpCnByaW50KCcgIGZpeGVkICVkIGFwcGVuZGVkICVkJyAlIChmaXhlZCwgYXApKQphZnRlciA9IGxvYWQoJ291dC5jb25maWcnKQpzdGlsbCA9IFtrIGZvciBrIGluIGEgaWYgYVtrXSA9PSAneScgYW5kIGFmdGVyLmdldChrKSAhPSAneSddCnByaW50KCcgIHN0aWxsIG1pc3Npbmc6ICVkJyAlIGxlbihzdGlsbCkpCg==' | base64 -d > /tmp/restore_cfg.py
-          python3 /tmp/restore_cfg.py || true
-          grep -E '^CONFIG_(TOUCHPANEL_SYNAPTICS_TD4160|OPLUS_FEATURE_DNS_HOOK|OPLUS_BLK_MONITOR|OPLUS_CHIP_SOC_NODE|MODULE_SIG_FORCE)=' out.config || true
-          echo "  --- 当前 y 项总数 ---"
-          grep -cE '^CONFIG_[A-Za-z0-9_]+=y$' out.config || true
+          echo "===== B. check_version patch ====="
+          echo 'CiMgLSotIGNvZGluZzogdXRmLTggLSotCiIiIuWcqCBrZXJuZWwvbW9kdWxlLmMg55qEIGNoZWNrX3ZlcnNpb24oKSDlvIDlpLTmj5LlhaUgcmV0dXJuIDEKCuebrueahO+8mue7lei/hyBNT0RWRVJTSU9OUyDnmoQgc3ltYm9sIENSQyDmr5Tlr7kK5L6d5o2u77ya5bey5a6e5rWL5Y6f5Y6CIGtvIOeahCBzdHJ1Y3QgbW9kdWxlIOW4g+WxgOS4juacrOWGheaguOWujOWFqOS4gOiHtAogICAgICDvvIjop6PmnpAgLnJlbGEuZ251LmxpbmtvbmNlLnRoaXNfbW9kdWxlIOmHjeWumuS9jeihqO+8mgogICAgICAgaW5pdD0weDE4MCBleGl0PTB4M2EwIHNpemU9MTAyNO+8jOS4pOi+uemAkOWtl+auteebuOWQjO+8iQogICAgICDllK/kuIDlt67lvILmmK8gZ2Vua3N5bXMg566X5Ye655qE5pWw5a2X77yM6ICM5Y6f5Y6C5YaF5qC45qCR5bim56eB5pyJIHBhdGNo77yMCiAgICAgIOivpeaVsOWtl+mAmui/h+WFrOW8gOa6kOeggeS4jeWPr+WkjeeOsOOAggoiIiIKaW1wb3J0IHJlLCBzeXMsIG9zCgpQID0gJ2tlcm5lbC9tb2R1bGUuYycKaWYgbm90IG9zLnBhdGguaXNmaWxlKFApOgogICAgcHJpbnQoJyEhICVzIOS4jeWtmOWcqCcgJSBQKQogICAgc3lzLmV4aXQoMSkKCnNyYyA9IG9wZW4oUCwgZW5jb2Rpbmc9J3V0ZjgnLCBlcnJvcnM9J3JlcGxhY2UnKS5yZWFkKCkKCk1BUksgPSAnUEpTMTEwX1ZFTkRPUl9LT19CWVBBU1MnCmlmIE1BUksgaW4gc3JjOgogICAgcHJpbnQoJyAgW3NraXBdIOihpeS4geW3suWtmOWcqCcpCiAgICBzeXMuZXhpdCgwKQoKbSA9IHJlLnNlYXJjaChyJyhzdGF0aWNccytpbnRccytjaGVja192ZXJzaW9uXHMqXChbXildKlwpXHMqXHspJywgc3JjKQppZiBub3QgbToKICAgIHByaW50KCchISDmib7kuI3liLAgY2hlY2tfdmVyc2lvbiDlrprkuYknKQogICAgc3lzLmV4aXQoMSkKCmluamVjdCA9IChtLmdyb3VwKDEpCiAgICAgICAgICArICdcblx0LyogJyArIE1BUksgKyAnOiBsYXlvdXQgdmVyaWZpZWQgaWRlbnRpY2FsLCBza2lwIENSQyBjaGVjayAqL1xuJwogICAgICAgICAgKyAnXHRyZXR1cm4gMTsgLyogJyArIE1BUksgKyAnICovXG4nKQoKb3V0ID0gc3JjWzptLnN0YXJ0KCldICsgaW5qZWN0ICsgc3JjW20uZW5kKCk6XQpvcGVuKFAsICd3JywgZW5jb2Rpbmc9J3V0ZjgnKS53cml0ZShvdXQpCnByaW50KCcgIFtva10gJXMgcGF0Y2hlZCAoY2hlY2tfdmVyc2lvbiAtPiByZXR1cm4gMSknICUgUCkKcHJpbnQoJyAgICAgICAlZCAtPiAlZCBieXRlcycgJSAobGVuKHNyYyksIGxlbihvdXQpKSkK' | base64 -d > /tmp/patch_modver.py
+          python3 /tmp/patch_modver.py || fail=1
+          grep -c 'PJS110_VENDOR_KO_BYPASS' kernel/module.c || true
 
-          # ★★★ 核心修复 2：把没被 source 的 Kconfig 全部补进上级 =y 的 Kconfig ★★★
-          #
-          # 背景：out.config 里写 CONFIG_XXX=y 不算数
-          #   kbuild 只保留「在某个被 source 的 Kconfig 里有 config XXX 声明」的项
-          #   否则 autoconf 静默丢弃 → 产物的 kernel.config 里就没有 → .o 不编译
-          #   更关键：结构体定义缺失 → genksyms CRC 变化 → vendor ko 全部拒载
-          #
-          # 做法：扫描全树 Kconfig，找出「有 config 声明但没被任何人 source」的，
-          #   补进它所在目录的父级 Makefile 对应的 Kconfig
-          echo "  --- 补全未 source 的 Kconfig ---"
-          echo 'CmltcG9ydCBvcywgcmUsIHN5cywgc3VicHJvY2VzcwoKUk9PVCA9IG9zLmdldGN3ZCgpClZFTkRPUiA9IG9zLnBhdGguYWJzcGF0aChvcy5wYXRoLmpvaW4oUk9PVCwgJy4uJywgJ3ZlbmRvcicpKQoKIyDimIUg57K+5YeG5omT5rOV77ya5Y+q6ZKI5a+544CM5Y6f5Y6CID15IOS9huS6p+eJqemdniB544CN55qE5YW35L2TIHN5bWJvbO+8jOaJvuWug+aJgOWcqOeahCBLY29uZmlnCiMgICDnhLblkI7miorpgqPkuKogS2NvbmZpZyDooaXov5vlroPnmoTkuIrnuqcgS2NvbmZpZ+OAguS4jeWBmuWFqOagkeaJq+aPj++8jOS4jeeMnOOAggpUQVJHRVRTID0gWwogICAgJ1RPVUNIUEFORUxfU1lOQVBUSUNTX1RENDE2MCcsICdUT1VDSFBBTkVMX0ZPQ0FMJywgJ1RPVUNIUEFORUxfSElNQVgnLAogICAgJ1RPVUNIUEFORUxfRk9DQUxfRlQzNTE4JywgJ1RPVUNIUEFORUxfRk9DQUxfRlQ4MDA2U19BQScsCiAgICAnVE9VQ0hQQU5FTF9OVF9ESUdJVEFMTk9JU0VfVEVTVCcsICdUT1VDSFBBTkVMX05UX1BFTl9TVVBQT1JUJywKICAgICdUT1VDSFBBTkVMX05PVkFfTlQzNjUyNUJfTk9GTEFTSCcsICdUT1VDSFBBTkVMX05PVkFfTlQzNjY3MkNfTk9GTEFTSCcsCiAgICAnVE9VQ0hQQU5FTF9ISU1BWF9IWDgzMTAyRF9OT0ZMQVNIJywgJ1RPVUNIUEFORUxfSElNQVhfSFg4MzExMkZfTk9GTEFTSCcsCiAgICAnVE9VQ0hQQU5FTF9JTElURUtfSUxJVEVLNzgwN1MnLCAnVE9VQ0hQQU5FTF9DSElQT05FX0lDTkw5OTExQycsCiAgICAnT1BMVVNfQkxLX01PTklUT1InLCAnT1BMVVNfTUVNX01PTklUT1InLCAnT1BMVVNfUFJPQUNUSVZFX0NPTVBBQ1QnLAogICAgJ1BST0FDVElWRV9DT01QQUNUJywgJ09QTFVTX0NISVBfU09DX05PREUnLCAnT1BMVVNfU0hPUlRfQ19CQVRUX0NIRUNLJywKICAgICdPUExVU19TSE9SVF9VU0VSU1BBQ0UnLCAnT1BMVVNfSU9OX0JPT1NUUE9PTF9TVVBQT1JUX1BSSicsCiAgICAnT1BMVVNfRkVBVFVSRV9ETlNfSE9PSycsICdPUExVU19GRUFUVVJFX1NUQVRTX0NBTEMnLCAnT1BMVVNfRkVBVFVSRV9RUl9TQ0FOJywKICAgICdPUExVU19GRUFUVVJFX0RBVEFfTU9EVUxFJywgJ09QTFVTX0ZFQVRVUkVfUk9UQVRJT05fREVURUNUJywKICAgICdPUExVU19GRUFUVVJFX0JBQ0tfVEFQX0RFVEVDVCcsICdPUExVU19GRUFUVVJFX0NQVV9KQU5LSU5GTycsCiAgICAnT1BMVVNfRkVBVFVSRV9TSUdLSUxMX0RJQUdOT1NJUycsICdPUExVU19GRUFUVVJFX1NUT1JBR0VfSU9fTUVUUklDUycsCiAgICAnT1BMVVNfRkVBVFVSRV9GSUxFX01PTklUT1InLCAnT1BMVVNfUE9XRVJJTkZPX1NUQU5EQllfREVCVUcnLAogICAgJ0YyRlNfRlNfQ09NUFJFU1NJT04nLCAnRjJGU19BUFBCT09TVCcsICdGMkZTX0ZTX0RFRFVQJywKICAgICdMWjRIQ19DT01QUkVTUycsCl0KCiMgMS4g5om+5q+P5LiqIHN5bWJvbCDlrprkuYnlnKjlk6rkuKogS2NvbmZpZwpkZWNsX3JlID0ge30KZm9yIGJhc2UgaW4gKFJPT1QsIFZFTkRPUik6CiAgICBpZiBub3Qgb3MucGF0aC5pc2RpcihiYXNlKToKICAgICAgICBjb250aW51ZQogICAgZm9yIGRwLCBkbiwgZm5zIGluIG9zLndhbGsoYmFzZSk6CiAgICAgICAgZG5bOl0gPSBbZCBmb3IgZCBpbiBkbiBpZiBkIG5vdCBpbiAoJy5naXQnLCAnb3V0JywgJy5yZXBvJyldCiAgICAgICAgZm9yIGZuIGluIGZuczoKICAgICAgICAgICAgaWYgJ0tjb25maWcnIG5vdCBpbiBmbjoKICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgIHAgPSBvcy5wYXRoLmpvaW4oZHAsIGZuKQogICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICB0eHQgPSBvcGVuKHAsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKQogICAgICAgICAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgZm9yIHQgaW4gVEFSR0VUUzoKICAgICAgICAgICAgICAgIGlmIHJlLnNlYXJjaChyJ15ccypjb25maWdccysnICsgdCArIHInXHMqJCcsIHR4dCwgcmUuTSk6CiAgICAgICAgICAgICAgICAgICAgZGVjbF9yZS5zZXRkZWZhdWx0KHQsIHApCgpwcmludCgnICDmib7liLDlrprkuYnnmoQgc3ltYm9sOiAlZCAvICVkJyAlIChsZW4oZGVjbF9yZSksIGxlbihUQVJHRVRTKSkpCmZvciB0IGluIFRBUkdFVFM6CiAgICBpZiB0IGluIGRlY2xfcmU6CiAgICAgICAgcHJpbnQoJyAgICAlLTQycyAtPiAlcycgJSAodCwgb3MucGF0aC5yZWxwYXRoKGRlY2xfcmVbdF0sIFJPT1QpKSkKCiMgMi4g5pS26ZuG5omA5pyJ5beyIHNvdXJjZQpzb3VyY2VkID0gc2V0KCkKU1JDID0gcmUuY29tcGlsZShyJ15ccypzb3VyY2VccysiKFteIl0rKSInLCByZS5NKQpmb3IgYmFzZSBpbiAoUk9PVCwgVkVORE9SKToKICAgIGlmIG5vdCBvcy5wYXRoLmlzZGlyKGJhc2UpOgogICAgICAgIGNvbnRpbnVlCiAgICBmb3IgZHAsIGRuLCBmbnMgaW4gb3Mud2FsayhiYXNlKToKICAgICAgICBkbls6XSA9IFtkIGZvciBkIGluIGRuIGlmIGQgbm90IGluICgnLmdpdCcsICdvdXQnKV0KICAgICAgICBmb3IgZm4gaW4gZm5zOgogICAgICAgICAgICBpZiAnS2NvbmZpZycgbm90IGluIGZuOgogICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgcCA9IG9zLnBhdGguam9pbihkcCwgZm4pCiAgICAgICAgICAgIHRyeToKICAgICAgICAgICAgICAgIHR4dCA9IG9wZW4ocCwgZXJyb3JzPSdyZXBsYWNlJykucmVhZCgpCiAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICBmb3IgbSBpbiBTUkMuZmluZGl0ZXIodHh0KToKICAgICAgICAgICAgICAgIHMgPSBtLmdyb3VwKDEpCiAgICAgICAgICAgICAgICBzb3VyY2VkLmFkZChvcy5wYXRoLm5vcm1wYXRoKG9zLnBhdGguam9pbihST09ULCBzKSkpCgojIDMuIOWvueayoeiiqyBzb3VyY2Ug55qEIEtjb25maWfvvIzooaXliLDlroPnmoTjgIznm7TmjqXkuIrnuqfnm67lvZXnmoQgS2NvbmZpZ+OAjQphZGRlZCA9IDAKZG9uZSA9IHNldCgpCiMg4piFIOWFs+mUru+8mui/reS7o+WIsOeos+WumuOAguihpeWujOS4gOWxguWQju+8jOS4iuS4gOe6p+WPr+iDveWPiOWPmOaIkCBvcnBoYW7vvIzopoHnu6fnu63ooaUKZm9yIHJvdW5kX25vIGluIHJhbmdlKDYpOgogICAgIyDmr4/ova7ph43nrpcgc291cmNlZAogICAgc291cmNlZCA9IHNldCgpCiAgICBmb3IgYmFzZSBpbiAoUk9PVCwgVkVORE9SKToKICAgICAgICBpZiBub3Qgb3MucGF0aC5pc2RpcihiYXNlKToKICAgICAgICAgICAgY29udGludWUKICAgICAgICBmb3IgZHAsIGRuLCBmbnMgaW4gb3Mud2FsayhiYXNlKToKICAgICAgICAgICAgZG5bOl0gPSBbZCBmb3IgZCBpbiBkbiBpZiBkIG5vdCBpbiAoJy5naXQnLCAnb3V0JyldCiAgICAgICAgICAgIGZvciBmbiBpbiBmbnM6CiAgICAgICAgICAgICAgICBpZiAnS2NvbmZpZycgbm90IGluIGZuOgogICAgICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgICAgICBwID0gb3MucGF0aC5qb2luKGRwLCBmbikKICAgICAgICAgICAgICAgIHRyeToKICAgICAgICAgICAgICAgICAgICB0eHQgPSBvcGVuKHAsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKQogICAgICAgICAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICAgICAgZm9yIG0gaW4gU1JDLmZpbmRpdGVyKHR4dCk6CiAgICAgICAgICAgICAgICAgICAgcyA9IG0uZ3JvdXAoMSkKICAgICAgICAgICAgICAgICAgICBzb3VyY2VkLmFkZChvcy5wYXRoLm5vcm1wYXRoKG9zLnBhdGguam9pbihST09ULCBzKSkpCiAgICAgICAgICAgICAgICAgICAgc291cmNlZC5hZGQob3MucGF0aC5ub3JtcGF0aChvcy5wYXRoLmpvaW4ob3MucGF0aC5kaXJuYW1lKHApLCBzKSkpCgogICAgcl9hZGRlZCA9IDAKICAgIGZvciB0LCBrYyBpbiBkZWNsX3JlLml0ZW1zKCk6CiAgICAgICAga2MgPSBvcy5wYXRoLm5vcm1wYXRoKGtjKQogICAgICAgIGlmIGtjIGluIGRvbmUgb3Iga2MgaW4gc291cmNlZDoKICAgICAgICAgICAgY29udGludWUKICAgICAgICAjIOmAkOe6p+W+gOS4iuaJvu+8jOebtOWIsOaJvuWIsOS4gOS4quOAjOW3suiiqyBzb3VyY2XjgI3miJbjgIzmoLnnuqfjgI3nmoQgS2NvbmZpZwogICAgICAgIHVwID0gb3MucGF0aC5kaXJuYW1lKGtjKQogICAgICAgIHRhcmdldCA9IE5vbmUKICAgICAgICBmb3IgXyBpbiByYW5nZSg4KToKICAgICAgICAgICAgY2FuZCA9IG9zLnBhdGguam9pbih1cCwgJ0tjb25maWcnKQogICAgICAgICAgICBpZiBvcy5wYXRoLmlzZmlsZShjYW5kKSBhbmQgb3MucGF0aC5ub3JtcGF0aChjYW5kKSAhPSBrYzoKICAgICAgICAgICAgICAgIHRhcmdldCA9IGNhbmQKICAgICAgICAgICAgICAgIGJyZWFrCiAgICAgICAgICAgIHVwMiA9IG9zLnBhdGguZGlybmFtZSh1cCkKICAgICAgICAgICAgaWYgdXAyID09IHVwOgogICAgICAgICAgICAgICAgYnJlYWsKICAgICAgICAgICAgdXAgPSB1cDIKICAgICAgICBpZiBub3QgdGFyZ2V0OgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIHJlbCA9IG9zLnBhdGgucmVscGF0aChrYywgUk9PVCkucmVwbGFjZSgnXFwnLCAnLycpCiAgICAgICAgdHJ5OgogICAgICAgICAgICB0eHQgPSBvcGVuKHRhcmdldCwgZXJyb3JzPSdyZXBsYWNlJykucmVhZCgpCiAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICAgICAgY29udGludWUKICAgICAgICBpZiByZWwgaW4gdHh0OgogICAgICAgICAgICBkb25lLmFkZChrYykKICAgICAgICAgICAgY29udGludWUKICAgICAgICB3aXRoIG9wZW4odGFyZ2V0LCAnYScsIGVycm9ycz0ncmVwbGFjZScpIGFzIGZoOgogICAgICAgICAgICBmaC53cml0ZSgnXG5zb3VyY2UgIiVzIlxuJyAlIHJlbCkKICAgICAgICBkb25lLmFkZChrYykKICAgICAgICByX2FkZGVkICs9IDEKICAgICAgICBwcmludCgnICAgICsgc291cmNlICIlcyIgLT4gJXMnICUgKHJlbCwgb3MucGF0aC5yZWxwYXRoKHRhcmdldCwgUk9PVCkpKQogICAgYWRkZWQgKz0gcl9hZGRlZAogICAgcHJpbnQoJyAgcm91bmQgJWQ6IOihpSAlZCDmnaEnICUgKHJvdW5kX25vICsgMSwgcl9hZGRlZCkpCiAgICBpZiByX2FkZGVkID09IDA6CiAgICAgICAgYnJlYWsKCnByaW50KCcgIOihpSBzb3VyY2Ug5oC76K6hOiAlZCDmnaEnICUgYWRkZWQpCgojIOKYheKYheKYhSDlhbPplK7ooaXlhYXvvJrnoa7kv50gdGFyZ2V0IEtjb25maWcg5LuO5qC5IEtjb25maWcg5Y+v5Yiw6L6+IOKYheKYheKYhQojIOS4iumdouWPquihpeS6huOAjOS4gOe6p+OAje+8jOS9huaVtOadoemTvuWPr+iDveS4remXtOaWreS6hu+8iOS+i+WmgiBTeW5hcHRpY3MvS2NvbmZpZyDooqsgc291cmNlIOS6hu+8jAojIOS9hiBvcGx1c190b3VjaHNjcmVlbi9LY29uZmlnIOacrOi6q+ayoeiiqyBkcml2ZXJzL2lucHV0L3RvdWNoc2NyZWVuL0tjb25maWcgc291cmNl77yJCiMg6L+Z6YeM5YGa5LiA5qyh44CM5Y+v6L6+5oCn6aqM6K+B44CN77ya5LuOIFJPT1QvS2NvbmZpZyDlh7rlj5EgQkZT77yM55yL5q+P5LiqIHRhcmdldCDmmK/lkKbnnJ/og73liLDovr4KZGVmIGNvbGxlY3RfZWRnZXMoKToKICAgIGVkZ2VzID0ge30KICAgIGZvciBiYXNlIGluIChST09ULCBWRU5ET1IpOgogICAgICAgIGlmIG5vdCBvcy5wYXRoLmlzZGlyKGJhc2UpOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGZvciBkcCwgZG4sIGZucyBpbiBvcy53YWxrKGJhc2UpOgogICAgICAgICAgICBkbls6XSA9IFtkIGZvciBkIGluIGRuIGlmIGQgbm90IGluICgnLmdpdCcsICdvdXQnKV0KICAgICAgICAgICAgZm9yIGZuIGluIGZuczoKICAgICAgICAgICAgICAgIGlmICdLY29uZmlnJyBub3QgaW4gZm46CiAgICAgICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgICAgIHAgPSBvcy5wYXRoLmpvaW4oZHAsIGZuKQogICAgICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgICAgIHR4dCA9IG9wZW4ocCwgZXJyb3JzPSdyZXBsYWNlJykucmVhZCgpCiAgICAgICAgICAgICAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgICAgICB0Z3QgPSBbXQogICAgICAgICAgICAgICAgZm9yIG0gaW4gU1JDLmZpbmRpdGVyKHR4dCk6CiAgICAgICAgICAgICAgICAgICAgcyA9IG0uZ3JvdXAoMSkKICAgICAgICAgICAgICAgICAgICBmb3IgY2FuZCBpbiAocywgb3MucGF0aC5qb2luKG9zLnBhdGguZGlybmFtZShwKSwgcykpOgogICAgICAgICAgICAgICAgICAgICAgICBhcCA9IG9zLnBhdGgubm9ybXBhdGgob3MucGF0aC5qb2luKFJPT1QsIGNhbmQpKQogICAgICAgICAgICAgICAgICAgICAgICBpZiBvcy5wYXRoLmlzZmlsZShhcCk6CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB0Z3QuYXBwZW5kKGFwKQogICAgICAgICAgICAgICAgICAgICAgICAgICAgYnJlYWsKICAgICAgICAgICAgICAgIGVkZ2VzW29zLnBhdGgubm9ybXBhdGgocCldID0gdGd0CiAgICByZXR1cm4gZWRnZXMKCmRlZiByZWFjaGFibGUoZWRnZXMsIHN0YXJ0LCB3YW50KToKICAgIHNlZW4gPSBzZXQoKQogICAgc3RhY2sgPSBbc3RhcnRdCiAgICB3aGlsZSBzdGFjazoKICAgICAgICBjdXIgPSBzdGFjay5wb3AoKQogICAgICAgIGlmIGN1ciBpbiBzZWVuOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIHNlZW4uYWRkKGN1cikKICAgICAgICBpZiBjdXIgPT0gd2FudDoKICAgICAgICAgICAgcmV0dXJuIFRydWUKICAgICAgICBzdGFjay5leHRlbmQoZWRnZXMuZ2V0KGN1ciwgW10pKQogICAgcmV0dXJuIEZhbHNlCgplZGdlcyA9IGNvbGxlY3RfZWRnZXMoKQpST09UX0tDID0gb3MucGF0aC5ub3JtcGF0aChvcy5wYXRoLmpvaW4oUk9PVCwgJ0tjb25maWcnKSkKcHJpbnQoJyAg5Y+v6L6+5oCn5qOA5p+l77yI5LuOICVzIOWHuuWPke+8iScgJSBvcy5wYXRoLnJlbHBhdGgoUk9PVF9LQywgUk9PVCkpCnVucmVhY2ggPSBbXQpmb3IgdCBpbiBUQVJHRVRTOgogICAgaWYgdCBub3QgaW4gZGVjbF9yZToKICAgICAgICBjb250aW51ZQogICAga2MgPSBvcy5wYXRoLm5vcm1wYXRoKGRlY2xfcmVbdF0pCiAgICBpZiBub3QgcmVhY2hhYmxlKGVkZ2VzLCBST09UX0tDLCBrYyk6CiAgICAgICAgdW5yZWFjaC5hcHBlbmQoKHQsIGtjKSkKcHJpbnQoJyAg5LiN5Y+v6L6+55qEIHRhcmdldDogJWQnICUgbGVuKHVucmVhY2gpKQpmb3IgdCwga2MgaW4gdW5yZWFjaFs6MTVdOgogICAgcHJpbnQoJyAgICAhISAlLTQycyAlcycgJSAodCwgb3MucGF0aC5yZWxwYXRoKGtjLCBST09UKSkpCgojIOWvueS4jeWPr+i+vueahO+8jOmAkOe6p+WQkeS4iuaJvuOAjOW3suWPr+i+vuOAjeeahOelluWFiCBLY29uZmln77yM6KGl6L+b5Y67CmlmIHVucmVhY2g6CiAgICBmaXhlZCA9IDAKICAgIGZvciB0LCBrYyBpbiB1bnJlYWNoOgogICAgICAgIGtjID0gb3MucGF0aC5ub3JtcGF0aChrYykKICAgICAgICAjIOS7juWug+eahOeItuebruW9leW8gOWni+WQkeS4iu+8jOaJvuesrOS4gOS4quOAjOW3suWPr+i+vuOAjeeahCBLY29uZmlnCiAgICAgICAgdXAgPSBvcy5wYXRoLmRpcm5hbWUoa2MpCiAgICAgICAgZG9uZV9mbGFnID0gRmFsc2UKICAgICAgICBmb3IgXyBpbiByYW5nZSg4KToKICAgICAgICAgICAgY2FuZCA9IG9zLnBhdGguam9pbih1cCwgJ0tjb25maWcnKQogICAgICAgICAgICBjYW5kID0gb3MucGF0aC5ub3JtcGF0aChjYW5kKQogICAgICAgICAgICBpZiBvcy5wYXRoLmlzZmlsZShjYW5kKSBhbmQgY2FuZCAhPSBrYzoKICAgICAgICAgICAgICAgIGlmIHJlYWNoYWJsZShlZGdlcywgUk9PVF9LQywgY2FuZCk6CiAgICAgICAgICAgICAgICAgICAgcmVsID0gb3MucGF0aC5yZWxwYXRoKGtjLCBvcy5wYXRoLmRpcm5hbWUoY2FuZCkpLnJlcGxhY2UoJ1xcJywgJy8nKQogICAgICAgICAgICAgICAgICAgIHRyeToKICAgICAgICAgICAgICAgICAgICAgICAgdHh0ID0gb3BlbihjYW5kLCBlcnJvcnM9J3JlcGxhY2UnKS5yZWFkKCkKICAgICAgICAgICAgICAgICAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgICAgICAgICAgICAgICAgICBicmVhawogICAgICAgICAgICAgICAgICAgIGlmIHJlbCBpbiB0eHQ6CiAgICAgICAgICAgICAgICAgICAgICAgIGRvbmVfZmxhZyA9IFRydWUKICAgICAgICAgICAgICAgICAgICAgICAgYnJlYWsKICAgICAgICAgICAgICAgICAgICB3aXRoIG9wZW4oY2FuZCwgJ2EnLCBlcnJvcnM9J3JlcGxhY2UnKSBhcyBmaDoKICAgICAgICAgICAgICAgICAgICAgICAgZmgud3JpdGUoJ1xuc291cmNlICIlcyJcbicgJSByZWwpCiAgICAgICAgICAgICAgICAgICAgcHJpbnQoJyAgICArICjlj6/ovr7kv67lpI0pIHNvdXJjZSAiJXMiIC0+ICVzJyAlIChyZWwsIG9zLnBhdGgucmVscGF0aChjYW5kLCBST09UKSkpCiAgICAgICAgICAgICAgICAgICAgZml4ZWQgKz0gMQogICAgICAgICAgICAgICAgICAgIGRvbmVfZmxhZyA9IFRydWUKICAgICAgICAgICAgICAgICAgICBicmVhawogICAgICAgICAgICB1cDIgPSBvcy5wYXRoLmRpcm5hbWUodXApCiAgICAgICAgICAgIGlmIHVwMiA9PSB1cDoKICAgICAgICAgICAgICAgIGJyZWFrCiAgICAgICAgICAgIHVwID0gdXAyCiAgICAgICAgaWYgbm90IGRvbmVfZmxhZzoKICAgICAgICAgICAgcHJpbnQoJyAgICAhISDmib7kuI3liLDlj6/ovr7npZblhYg6ICVzJyAlIG9zLnBhdGgucmVscGF0aChrYywgUk9PVCkpCiAgICBwcmludCgnICDlj6/ovr7kv67lpI06ICVkIOadoScgJSBmaXhlZCkK' | base64 -d > /tmp/fix_kconfig.py
-          if [ "${EXP_PURE_STOCK:-0}" = "1" ]; then
-            echo "  ★★ 实验模式：跳过 Kconfig 补全 ★★"
-          else
-            python3 /tmp/fix_kconfig.py 2>&1 | tail -30 || true
-          fi
-          # ★ 树是否脏（决定 vermagic 的 +）
-          if git -C . rev-parse --git-dir >/dev/null 2>&1; then
-            DIRTY=$(git -C . status --porcelain 2>/dev/null | head -1)
-            [ -n "$DIRTY" ] && echo "  [ok]   树是脏的，会得到 +" || echo "  [!!] 树是干净的，vermagic 会缺 +"
-          else
-            echo "  [note] 非 git 树，kbuild 会按 setlocalversion 规则处理"
-          fi
-          # Droidspaces 必需
-          if [ "${EXP_PURE_STOCK:-0}" = "1" ]; then
-            echo "  ★★ 实验模式：完全不改 config，纯原厂配置 ★★"
-          else
-            printf '\nCONFIG_SYSVIPC=y\nCONFIG_SYSVIPC_SYSCTL=y\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_POSIX_MQUEUE=y\nCONFIG_TMPFS_XATTR=y\n' >> out.config
-          fi
-          #
-          #   MODVERSIONS 的其它符号 CRC 确实会受结构体布局影响，
-          #   但 vendor ko 只依赖少数几个（实测导入符号里没有 task_struct 相关），
-          #   所以 SYSVIPC 安全。
-          printf '\nCONFIG_SYSVIPC=y\nCONFIG_SYSVIPC_SYSCTL=y\nCONFIG_IPC_NS=y\nCONFIG_USER_NS=y\nCONFIG_CGROUP_PIDS=y\nCONFIG_DEVTMPFS=y\nCONFIG_DEVTMPFS_MOUNT=y\nCONFIG_POSIX_MQUEUE=y\nCONFIG_TMPFS_XATTR=y\n' >> out.config
-          # OPPO 项目信息 + 反馈模块：原厂未开，导致 get_eng_version / oplus_kevent_fb_str 无定义
-          printf 'CONFIG_OPLUS_FEATURE_OPROJECT=y\nCONFIG_OPLUS_FEATURE_FEEDBACK=y\n' >> out.config
-          # 内核树 kernel/futex.c 调用 locking_vh_do_futex_handler，
-          # 但两套 vendor 代码（sched_assist/sync、synchronize）都不提供该符号
-          # （它们提供的是 locking_vh_do_futex / android_vh_do_futex_handler）
-          # → 直接把调用点用 #if 0 屏蔽，功能等价于未启用该优化
-          FUTEX_C="kernel/futex.c"
-          if [ -f "$FUTEX_C" ]; then
-            cnt=$(grep -c 'locking_vh_.*_handler' "$FUTEX_C" 2>/dev/null || echo 0)
-            echo "  发现 $cnt 处 locking_vh_*_handler 调用"
-            # 把所有 #if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY) 改成 #if 0
-            # 这些块里全是 vendor 未提供的 _handler 符号
-            sed -i 's/^#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)$/#if 0 \/* oplus locking strategy: vendor handlers not provided *\//' "$FUTEX_C"
-            left=$(grep -c 'IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)' "$FUTEX_C" 2>/dev/null || echo 0)
-            echo "  剩余 IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY): $left"
-            grep -n 'vendor handlers not provided' "$FUTEX_C" | head -12
-            ok 0 "futex.c 屏蔽 vendor 缺失的 handler 调用"
-          else
-            echo "  [note] $FUTEX_C 缺失"
-          fi
+          echo "===== C. Kconfig reachability (source only, no config values) ====="
+          echo 'CiMgLSotIGNvZGluZzogdXRmLTggLSotCiIiIuiuqSBPUFBPL01USyDnp4HmnIkgS2NvbmZpZyDku47moLkgS2NvbmZpZyDlj6/ovr4KCiog5Y+q5pS5IHNvdXJjZSDor63lj6XvvIzkuIDkuKrlrZfpg73kuI3norAgY29uZmlnIOWAvCAqCgrog4zmma/vvJoKICDljp/ljoIgY29uZmlnIOmHjOacieS4gOWkp+aJuSA9eSDnmoTpobnvvIzlroPku6znmoQgY29uZmlnIOWjsOaYjuaJgOWcqOeahCBLY29uZmlnCiAg5rKh5pyJ6KKrIHNvdXJjZSDliLDkuLvmoJHjgIJrYnVpbGQg6YGH5YiwIC5jb25maWcg6YeM5rKh5pyJIEtjb25maWcg5aOw5piO55qE56ym5Y+377yMCiAg5Lya5ZyoIHN5bmNjb25maWcg6Zi25q6155u05o6l5Lii5byDIC0+IOmCo+S6m+mpseWKqOS4gOS4qumDveS4jee8luOAggoKICDlrp7mtYvnvLrlpLHnmoTvvIjljp/ljoLlhajmmK8gPXnvvInvvJoKICAgIENPTkZJR19UT1VDSFBBTkVMXyogICAgICAgICAgICAyMSDpobkgICDop6bmkbjlsY8KICAgIENPTkZJR19EUk1fUEFORUxfT1BMVVMqICAgICAgICAxOCDpobkgICDpnaLmnb/vvIjlsY/luZXngrnkuI3kuq7vvIkKICAgIENPTkZJR19PUExVU18qICAgICAgICAgICAgICAgICDkuIDmibkgICAgT1BQTyDns7vnu5/lsYLvvIjlkKsgUEhPRU5JWCDlkK/liqjliKTlrprvvIkKCuWBmuazle+8mgogIDEuIOS7juaguSBLY29uZmlnIOWHuuWPkSBCRlPvvIznrpflh7rlk6rkupsgS2NvbmZpZyDlvZPliY3lj6/ovr4KICAyLiDlr7nmr4/kuKrnm67moIcgc3ltYm9s77yM5om+5Yiw5a6D55qEIEtjb25maWcg5Zyo5LiN5Zyo5Y+v6L6+6ZuG6YeMCiAgMy4g5LiN5Y+v6L6+5bCx6YCQ57qn5ZCR5LiK77yM6KGl5LiA5p2hIHNvdXJjZSDliLDmnIDov5HnmoTlt7Llj6/ovr7nmoTnpZblhYggS2NvbmZpZwogIDQuIOihpeWujOmHjeaWsCBCRlPvvIzov63ku6PliLDnqLPlrpoKIiIiCmltcG9ydCBvcywgcmUsIHN5cwoKUk9PVCA9IG9zLmdldGN3ZCgpClZFTkRPUiA9IG9zLnBhdGguYWJzcGF0aChvcy5wYXRoLmpvaW4oUk9PVCwgJy4uJywgJ3ZlbmRvcicpKQpCQVNFUyA9IFtiIGZvciBiIGluIChST09ULCBWRU5ET1IpIGlmIG9zLnBhdGguaXNkaXIoYildCgpTUkNfUkUgPSByZS5jb21waWxlKHInXlxzKnNvdXJjZVxzKyIoW14iXSspIicsIHJlLk0pCkRFQ0xfUkUgPSByZS5jb21waWxlKHInXlxzKig/Om1lbnUpP2NvbmZpZ1xzKyhbQS1aYS16MC05X10rKVxzKiQnLCByZS5NKQoKU0tJUF9ESVJTID0gc2V0KFsnLmdpdCcsICdvdXQnLCAnLnJlcG8nLCAnRG9jdW1lbnRhdGlvbiddKQoKCmRlZiB3YWxrX2tjb25maWdzKCk6CiAgICBmb3IgYmFzZSBpbiBCQVNFUzoKICAgICAgICBmb3IgZHAsIGRuLCBmbnMgaW4gb3Mud2FsayhiYXNlKToKICAgICAgICAgICAgZG5bOl0gPSBbZCBmb3IgZCBpbiBkbiBpZiBkIG5vdCBpbiBTS0lQX0RJUlNdCiAgICAgICAgICAgIGZvciBmbiBpbiBmbnM6CiAgICAgICAgICAgICAgICBpZiBmbi5zdGFydHN3aXRoKCdLY29uZmlnJyk6CiAgICAgICAgICAgICAgICAgICAgeWllbGQgb3MucGF0aC5ub3JtcGF0aChvcy5wYXRoLmpvaW4oZHAsIGZuKSkKCgpkZWYgcmVzb2x2ZShjdXJfZmlsZSwgcmVsKToKICAgIGlmIHJlbC5zdGFydHN3aXRoKCckJyk6CiAgICAgICAgcmV0dXJuIE5vbmUKICAgIGZvciBjYW5kIGluIChvcy5wYXRoLm5vcm1wYXRoKG9zLnBhdGguam9pbihST09ULCByZWwpKSwKICAgICAgICAgICAgICAgICBvcy5wYXRoLm5vcm1wYXRoKG9zLnBhdGguam9pbihvcy5wYXRoLmRpcm5hbWUoY3VyX2ZpbGUpLCByZWwpKSk6CiAgICAgICAgaWYgb3MucGF0aC5pc2ZpbGUoY2FuZCk6CiAgICAgICAgICAgIHJldHVybiBjYW5kCiAgICByZXR1cm4gTm9uZQoKCmRlZiBidWlsZF9ncmFwaCgpOgogICAgZWRnZXMgPSB7fQogICAgZm9yIHAgaW4gd2Fsa19rY29uZmlncygpOgogICAgICAgIHRyeToKICAgICAgICAgICAgdHh0ID0gb3BlbihwLCBlcnJvcnM9J3JlcGxhY2UnKS5yZWFkKCkKICAgICAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIHRndHMgPSBbXQogICAgICAgIGZvciBtIGluIFNSQ19SRS5maW5kaXRlcih0eHQpOgogICAgICAgICAgICByID0gcmVzb2x2ZShwLCBtLmdyb3VwKDEpKQogICAgICAgICAgICBpZiByOgogICAgICAgICAgICAgICAgdGd0cy5hcHBlbmQocikKICAgICAgICBlZGdlc1twXSA9IHRndHMKICAgIHJldHVybiBlZGdlcwoKCmRlZiByZWFjaGFibGVfc2V0KGVkZ2VzLCBzdGFydCk6CiAgICBzZWVuLCBzdGFjayA9IHNldCgpLCBbc3RhcnRdCiAgICB3aGlsZSBzdGFjazoKICAgICAgICBjdXIgPSBzdGFjay5wb3AoKQogICAgICAgIGlmIGN1ciBpbiBzZWVuOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIHNlZW4uYWRkKGN1cikKICAgICAgICBzdGFjay5leHRlbmQoZWRnZXMuZ2V0KGN1ciwgW10pKQogICAgcmV0dXJuIHNlZW4KCgpkZWYgbWFpbigpOgogICAgcm9vdF9rYyA9IG9zLnBhdGgubm9ybXBhdGgob3MucGF0aC5qb2luKFJPT1QsICdLY29uZmlnJykpCiAgICBpZiBub3Qgb3MucGF0aC5pc2ZpbGUocm9vdF9rYyk6CiAgICAgICAgcHJpbnQoJyEhIHJvb3QgS2NvbmZpZyBtaXNzaW5nJykKICAgICAgICBzeXMuZXhpdCgxKQoKICAgIHdhbnQgPSBzZXQoKQogICAgY2ZncCA9ICcvdG1wL3N0b2NrLmNvbmZpZycKICAgIGlmIG9zLnBhdGguaXNmaWxlKGNmZ3ApOgogICAgICAgIGZvciBsaW5lIGluIG9wZW4oY2ZncCwgZXJyb3JzPSdyZXBsYWNlJyk6CiAgICAgICAgICAgIGxpbmUgPSBsaW5lLnN0cmlwKCkKICAgICAgICAgICAgaWYgbGluZS5zdGFydHN3aXRoKCdDT05GSUdfJykgYW5kIGxpbmUuZW5kc3dpdGgoJz15Jyk6CiAgICAgICAgICAgICAgICB3YW50LmFkZChsaW5lWzc6LTJdKQogICAgcHJpbnQoJyAgc3ltYm9scyA9eSBpbiBzdG9jayBjb25maWc6ICVkJyAlIGxlbih3YW50KSkKCiAgICBkZWNsID0ge30KICAgIGZvciBwIGluIHdhbGtfa2NvbmZpZ3MoKToKICAgICAgICB0cnk6CiAgICAgICAgICAgIHR4dCA9IG9wZW4ocCwgZXJyb3JzPSdyZXBsYWNlJykucmVhZCgpCiAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICAgICAgY29udGludWUKICAgICAgICBmb3IgbSBpbiBERUNMX1JFLmZpbmRpdGVyKHR4dCk6CiAgICAgICAgICAgIGRlY2wuc2V0ZGVmYXVsdChtLmdyb3VwKDEpLCBwKQogICAgcHJpbnQoJyAgc3ltYm9scyBkZWNsYXJlZCBpbiBLY29uZmlnOiAlZCcgJSBsZW4oZGVjbCkpCgogICAgbWlzc2luZyA9IHNvcnRlZChzIGZvciBzIGluIHdhbnQgaWYgcyBub3QgaW4gZGVjbCkKICAgIHByaW50KCcgICogc3ltYm9scyB3aXRoIE5PIEtjb25maWcgZGVjbGFyYXRpb246ICVkJyAlIGxlbihtaXNzaW5nKSkKICAgIGZvciBzIGluIG1pc3NpbmdbOjIwXToKICAgICAgICBwcmludCgnICAgICAgJXMnICUgcykKCiAgICB0b3RhbF9hZGRlZCA9IDAKICAgIGZvciBybmQgaW4gcmFuZ2UoOCk6CiAgICAgICAgZWRnZXMgPSBidWlsZF9ncmFwaCgpCiAgICAgICAgcmVhY2ggPSByZWFjaGFibGVfc2V0KGVkZ2VzLCByb290X2tjKQoKICAgICAgICBieV9maWxlID0ge30KICAgICAgICBmb3IgcyBpbiB3YW50OgogICAgICAgICAgICBrYyA9IGRlY2wuZ2V0KHMpCiAgICAgICAgICAgIGlmIGtjIGFuZCBrYyBub3QgaW4gcmVhY2g6CiAgICAgICAgICAgICAgICBieV9maWxlLnNldGRlZmF1bHQoa2MsIFtdKS5hcHBlbmQocykKCiAgICAgICAgaWYgbm90IGJ5X2ZpbGU6CiAgICAgICAgICAgIHByaW50KCcgIHJvdW5kICVkOiBhbGwgcmVhY2hhYmxlIE9LJyAlIChybmQgKyAxKSkKICAgICAgICAgICAgYnJlYWsKCiAgICAgICAgcHJpbnQoJyAgcm91bmQgJWQ6ICVkIEtjb25maWcgdW5yZWFjaGFibGUnICUgKHJuZCArIDEsIGxlbihieV9maWxlKSkpCiAgICAgICAgYWRkZWRfdGhpcyA9IDAKICAgICAgICBmb3Iga2MgaW4gc29ydGVkKGJ5X2ZpbGUpOgogICAgICAgICAgICBzeW1zID0gYnlfZmlsZVtrY10KICAgICAgICAgICAgdXAgPSBvcy5wYXRoLmRpcm5hbWUoa2MpCiAgICAgICAgICAgIHRhcmdldCA9IE5vbmUKICAgICAgICAgICAgZm9yIF8gaW4gcmFuZ2UoMTApOgogICAgICAgICAgICAgICAgY2FuZCA9IG9zLnBhdGgubm9ybXBhdGgob3MucGF0aC5qb2luKHVwLCAnS2NvbmZpZycpKQogICAgICAgICAgICAgICAgaWYgb3MucGF0aC5pc2ZpbGUoY2FuZCkgYW5kIGNhbmQgIT0ga2MgYW5kIGNhbmQgaW4gcmVhY2g6CiAgICAgICAgICAgICAgICAgICAgdGFyZ2V0ID0gY2FuZAogICAgICAgICAgICAgICAgICAgIGJyZWFrCiAgICAgICAgICAgICAgICB1cDIgPSBvcy5wYXRoLmRpcm5hbWUodXApCiAgICAgICAgICAgICAgICBpZiB1cDIgPT0gdXA6CiAgICAgICAgICAgICAgICAgICAgYnJlYWsKICAgICAgICAgICAgICAgIHVwID0gdXAyCiAgICAgICAgICAgIGlmIG5vdCB0YXJnZXQ6CiAgICAgICAgICAgICAgICB0YXJnZXQgPSByb290X2tjCgogICAgICAgICAgICByZWwgPSBvcy5wYXRoLnJlbHBhdGgoa2MsIG9zLnBhdGguZGlybmFtZSh0YXJnZXQpKS5yZXBsYWNlKCdcXCcsICcvJykKICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgdHh0ID0gb3Blbih0YXJnZXQsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKQogICAgICAgICAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgaWYgcmVsIGluIHR4dDoKICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgIHdpdGggb3Blbih0YXJnZXQsICdhJywgZW5jb2Rpbmc9J3V0ZjgnLCBlcnJvcnM9J3JlcGxhY2UnKSBhcyBmaDoKICAgICAgICAgICAgICAgIGZoLndyaXRlKCdcbnNvdXJjZSAiJXMiXG4nICUgcmVsKQogICAgICAgICAgICBhZGRlZF90aGlzICs9IDEKICAgICAgICAgICAgcHJpbnQoJyAgICAgICsgc291cmNlICIlcyIgLT4gJXMgICglZCBzeW1zKScKICAgICAgICAgICAgICAgICAgJSAocmVsLCBvcy5wYXRoLnJlbHBhdGgodGFyZ2V0LCBST09UKSwgbGVuKHN5bXMpKSkKICAgICAgICB0b3RhbF9hZGRlZCArPSBhZGRlZF90aGlzCiAgICAgICAgaWYgYWRkZWRfdGhpcyA9PSAwOgogICAgICAgICAgICBwcmludCgnICAhISBubyBwcm9ncmVzcywgc3RvcCcpCiAgICAgICAgICAgIGJyZWFrCgogICAgcHJpbnQoJyAgdG90YWwgc291cmNlIGFkZGVkOiAlZCcgJSB0b3RhbF9hZGRlZCkKCgppZiBfX25hbWVfXyA9PSAnX19tYWluX18nOgogICAgbWFpbigpCg==' | base64 -d > /tmp/fix_kconfig.py
+          python3 /tmp/fix_kconfig.py 2>&1 | tail -60 || true
 
-          # 同理，kernel/locking/mutex.c 调用 mutex_list_add，需要 sched_assist_mutex
-          # 这个在 sched_assist 目录但只在 CONFIG_OPLUS_LOCKING_STRATEGY 下编
-          # → 打开 LOCKING_STRATEGY（futex 那处已屏蔽，不会有符号问题）
-          if grep -q '^# CONFIG_OPLUS_LOCKING_STRATEGY is not set' out.config; then
-            sed -i 's/^# CONFIG_OPLUS_LOCKING_STRATEGY is not set/CONFIG_OPLUS_LOCKING_STRATEGY=y/' out.config
-          elif ! grep -q '^CONFIG_OPLUS_LOCKING_STRATEGY=' out.config; then
-            printf 'CONFIG_OPLUS_LOCKING_STRATEGY=y\n' >> out.config
-          fi
-          echo "  [ok]   LOCKING_STRATEGY=y（提供 mutex_list_add）"
-          grep -E '^CONFIG_OPLUS_LOCKING_STRATEGY=' out.config || true
-          # ★★★ 关键修正（2026-10-31 二次排查）：module_layout CRC 的真正元凶 ★★★
-          #
-          # 症状：10 个 vendor .ko 全部报
-          #       "disagrees about version of symbol module_layout" → Exec format error
-          #       → WiFi / 蓝牙 / GPS / FM / fpsgo 全废
-          #
-          # 我一开始归因于 CONFIG_SYSVIPC（task_struct 加字段），那是错的。
-          # scripts/mod/modpost.c 里 module_layout 的 CRC 只对 【struct module】 计算，
-          # 与 task_struct 无关。而 struct module 里有：
-          #
-          #     #ifdef CONFIG_MODULE_SIG
-          #         bool sig_ok;
-          #     #endif
-          #
-          # 关掉 MODULE_SIG → sig_ok 字段消失 → struct module 变小 → CRC 变
-          # 实测设备 10 个 ko 期望的 CRC 统一是 0xddfea5da（原厂内核算出）
-          #
-          # 正确做法：MODULE_SIG 必须保持 =y（保住 struct module 布局）
-          #           只关 MODULE_SIG_FORCE（不强制校验签名，否则 vendor ko 因无签名被拒）
-          #           * 注意：SIG_ALL 也关（否则每次编译要现场生成签名密钥，浪费时间）
-          sed -i 's/^# CONFIG_MODULE_SIG is not set/CONFIG_MODULE_SIG=y/' out.config
-          if ! grep -q '^CONFIG_MODULE_SIG=' out.config; then
-            printf 'CONFIG_MODULE_SIG=y\n' >> out.config
-          fi
-          sed -i 's/^CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/' out.config
-          sed -i 's/^CONFIG_MODULE_SIG_ALL=y/# CONFIG_MODULE_SIG_ALL is not set/' out.config
-          echo "  [关键] MODULE_SIG=y（保住 struct module 布局 → module_layout CRC 不变）"
-          echo "  [关键] MODULE_SIG_FORCE=n（不强制校验 → vendor ko 能加载）"
-          grep -E '^CONFIG_MODULE_SIG' out.config || true
-          grep -E "^CONFIG_(SYSVIPC|IPC_NS|USER_NS|CGROUP_PIDS|DEVTMPFS|POSIX_MQUEUE|OPLUS_FEATURE_OPROJECT)=" out.config || true
-
-          [ "$fail" -eq 0 ] && echo "ALL PATCHES OK" || { echo "!! 有必改项失败"; exit 1; }
+          [ "$fail" -eq 0 ] && echo "PATCH OK" || { echo "!! patch failed"; exit 1; }
 
       - name: Build
         run: |
-          # ★ 用 clang 11.0.1 + LLD，和原厂工具链一致
-          #
-          # clang 不像 gcc 那样自带 target 前缀，必须显式给 CROSS_COMPILE
-          #   aarch64-linux-gnu-  → kbuild 会拼成 --target=aarch64-linux-gnu
-          # 千万别 unset CROSS_COMPILE，否则 clang 按 host x86_64 编，
-          # arm64 内联汇编全报 "unknown register name 'x1'"
-          export PATH="$CLANG_DIR/bin:$PATH"
+          export PATH="$HOME/clang-r383902/bin:$PATH"
           export ARCH=arm64 SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
+          export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
+          export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
           export CLANG_TRIPLE=aarch64-linux-gnu-
           clang --version | head -2
-          echo "  验证 target:"
-          echo 'int main(){return 0;}' > /tmp/t.c
-          clang --target=aarch64-linux-gnu -c /tmp/t.c -o /tmp/t.o && file /tmp/t.o
+
           mkdir -p out
-          cp out.config out/.config
-          # ★★★ 不要用 olddefconfig！ ★★★
-          #
-          # 实测教训：make olddefconfig 会用默认 Kconfig 求值，
-          #   LTO_CLANG 依赖 LD_IS_LLD / CC_IS_CLANG / LLVM 等一堆条件，
-          #   被求值成不满足 → CONFIG_LTO= 消失，变成 CONFIG_LTO_NONE=y
-          #   LTO 关掉后编译方式完全不同 → struct module 布局变 → module_layout CRC 变
-          #
-          #   实测：olddefconfig 后 CRC 从 0xf3c0b168 变成 0x24f46a95
-          #         而目标是 0xddfea5da
-          #
-          # 正确做法：直接 make，让 kbuild 走 syncconfig
-          #   syncconfig 只在 .config 比 auto.conf 新时才重算，且不会撤销已有项
-          echo "--- 跳过 olddefconfig（它会关掉 LTO/CFI，破坏 CRC）---"
-          grep -E '^CONFIG_(LTO|CFI_CLANG)=' out/.config | head -5 || true
-          KCF="-I$PWD/drivers/misc/mediatek/scp/include -I$PWD/drivers/misc/mediatek/include -Wno-error -Wno-error=strict-prototypes -Wno-error=return-type -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=deprecated-declarations -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-value -Wno-error=missing-prototypes -Wno-error=old-style-definition -Wno-error=int-conversion -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces -Wno-error=builtin-declaration-mismatch -Wno-error=ignored-optimization-argument -Wno-ignored-optimization-argument -Wno-error=unknown-warning-option -Wno-unknown-warning-option -Wno-error=unused-command-line-argument -Wno-unused-command-line-argument"
+          cp /tmp/stock.config out/.config
+          echo "--- .config check ---"
+          md5sum out/.config
+          grep -c '^CONFIG_' out/.config
+
+          echo "--- no olddefconfig (it would recompute deps and drop LTO/CFI) ---"
+          grep -E '^CONFIG_(LTO|CFI_CLANG|MODULE_SIG|CC_IS_CLANG)=' out/.config | head
+
+          KCF="-I$PWD/drivers/misc/mediatek/scp/include -I$PWD/drivers/misc/mediatek/include -Wno-error=date-time -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces -Wno-error=builtin-declaration-mismatch -Wno-error=ignored-optimization-argument -Wno-ignored-optimization-argument -Wno-error=unknown-warning-option -Wno-unknown-warning-option -Wno-error=unused-command-line-argument -Wno-unused-command-line-argument"
           set +e
-          # 彻底清掉 GCC 专有优化 flag（clang 不认识，MTK Makefile 里塞的）
-          for f in $(grep -rl -- '-fmerge-constants' . --include=Makefile --include='*.mk' --include=Kbuild 2>/dev/null); do
-            sed -i 's/-fmerge-constants//g' "$f"
-            echo "  [fix] 去 -fmerge-constants: $f"
-          done
           make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
                CC="clang --target=aarch64-linux-gnu" \
                LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
@@ -463,28 +111,39 @@ jobs:
           RC=$?
           set -e
           echo "=== BUILD EXIT: $RC ==="
-          echo "=== error 行（最多 80） ==="
-          grep -E "error:|fatal error:" /tmp/build.log | head -80 || true
-          echo "=== 最后 25 行 ==="
-          tail -25 /tmp/build.log || true
-          echo "=== out/arch/arm64/boot ==="
+          grep -E "error:|fatal error:" /tmp/build.log | head -60 || true
+          echo "=== last 30 lines ==="
+          tail -30 /tmp/build.log || true
           ls -la out/arch/arm64/boot/ 2>&1 | head -20 || true
 
-          # ★ 门禁：vermagic 必须与原厂逐字一致，否则产出物会变砖
           if [ "$RC" -eq 0 ] && [ -f out/arch/arm64/boot/Image ]; then
-            echo "=== VERMAGIC 门禁 ==="
             VM=$(strings -a out/arch/arm64/boot/Image | grep -m1 'SMP.*mod_unload' || echo "")
-            echo "  实际: [$VM]"
-            echo "  期望: [4.19.191+ SMP preempt mod_unload modversions aarch64]"
-            if [ "$VM" = "4.19.191+ SMP preempt mod_unload modversions aarch64" ]; then
-              echo "  [PASS] vermagic 与原厂一致"
-            else
-              echo "  [FAIL] vermagic 不符 —— 这份镜像刷了会变砖，中止"
+            echo "  vermagic: [$VM]"
+            if [ "$VM" != "4.19.191+ SMP preempt mod_unload modversions aarch64" ]; then
+              echo "  [FAIL] vermagic mismatch"
               exit 1
             fi
+            echo "  [PASS] vermagic ok"
           fi
+          [ "$RC" -eq 0 ] || exit 1
 
-          if [ "$RC" -ne 0 ]; then exit 1; fi
+      - name: Verify config
+        run: |
+          echo 'CiMgLSotIGNvZGluZzogdXRmLTggLSotCiIiIuS7jue8luivkeS6p+eJqemHjOaPkOWPluWGheW1jCBjb25maWfvvIzkuI7ljp/ljoLpgJDpobkgZGlmZiIiIgppbXBvcnQgc3lzLCB6bGliLCByZQoKTkVXID0gc3lzLmFyZ3ZbMV0gaWYgbGVuKHN5cy5hcmd2KSA+IDEgZWxzZSAnb3V0L2FyY2gvYXJtNjQvYm9vdC9JbWFnZScKU1RPQ0sgPSAnL3RtcC9zdG9jay5jb25maWcnCgoKZGVmIGVtYmVkZGVkKHBhdGgpOgogICAgayA9IG9wZW4ocGF0aCwgJ3JiJykucmVhZCgpCiAgICBwID0gay5maW5kKGInSUtDRkdfU1QnKQogICAgaWYgcCA8IDA6CiAgICAgICAgcmV0dXJuIE5vbmUKICAgIHAgKz0gOAogICAgZSA9IGsuZmluZChiJ0lLQ0ZHX0VEJywgcCkKICAgIGlmIGUgPCAwOgogICAgICAgIHJldHVybiBOb25lCiAgICB0cnk6CiAgICAgICAgcmV0dXJuIHpsaWIuZGVjb21wcmVzcyhrW3A6ZV0sIDE2ICsgemxpYi5NQVhfV0JJVFMpCiAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgIHJldHVybiBOb25lCgoKZGVmIHBhcnNlKGJsb2IpOgogICAgZCA9IHt9CiAgICBmb3IgbGluZSBpbiBibG9iLmRlY29kZSgndXRmOCcsICdyZXBsYWNlJykuc3BsaXRsaW5lcygpOgogICAgICAgIGxpbmUgPSBsaW5lLnN0cmlwKCkKICAgICAgICBpZiBub3QgbGluZToKICAgICAgICAgICAgY29udGludWUKICAgICAgICBpZiBsaW5lLnN0YXJ0c3dpdGgoJyMnKToKICAgICAgICAgICAgbSA9IHJlLm1hdGNoKHInIyAoQ09ORklHX1x3KykgaXMgbm90IHNldCcsIGxpbmUpCiAgICAgICAgICAgIGlmIG06CiAgICAgICAgICAgICAgICBkW20uZ3JvdXAoMSldID0gJ24nCiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgaWYgJz0nIGluIGxpbmUgYW5kIGxpbmUuc3RhcnRzd2l0aCgnQ09ORklHXycpOgogICAgICAgICAgICBrLCB2ID0gbGluZS5zcGxpdCgnPScsIDEpCiAgICAgICAgICAgIGRba10gPSB2CiAgICByZXR1cm4gZAoKCm5ld19jZmcgPSBlbWJlZGRlZChORVcpCmlmIG5ld19jZmcgaXMgTm9uZToKICAgIHByaW50KCchISBubyBlbWJlZGRlZCBjb25maWcgaW4gcHJvZHVjdCcpCiAgICBzeXMuZXhpdCgxKQoKc3RvY2tfY2ZnID0gb3BlbihTVE9DSywgJ3JiJykucmVhZCgpCgpubywgbnMgPSBwYXJzZShuZXdfY2ZnKSwgcGFyc2Uoc3RvY2tfY2ZnKQpwcmludCgnICBwcm9kdWN0IGNvbmZpZzogJWQgaXRlbXMgLyAlZCBieXRlcycgJSAobGVuKG5vKSwgbGVuKG5ld19jZmcpKSkKcHJpbnQoJyAgc3RvY2sgICBjb25maWc6ICVkIGl0ZW1zIC8gJWQgYnl0ZXMnICUgKGxlbihucyksIGxlbihzdG9ja19jZmcpKSkKCmFsbGsgPSBzb3J0ZWQoc2V0KG5vKSB8IHNldChucykpCmRpZmYgPSBbKGssIG5zLmdldChrLCAnKG5vbmUpJyksIG5vLmdldChrLCAnKG5vbmUpJykpIGZvciBrIGluIGFsbGsKICAgICAgICBpZiBucy5nZXQoaywgJyhub25lKScpICE9IG5vLmdldChrLCAnKG5vbmUpJyldCgpBTExPVyA9IHNldChbJ0NPTkZJR19NT0RVTEVfU0lHX0ZPUkNFJywgJ0NPTkZJR19NT0RVTEVfU0lHX0FMTCddKQpoYXJkID0gW2QgZm9yIGQgaW4gZGlmZiBpZiBkWzBdIG5vdCBpbiBBTExPV10Kc29mdCA9IFtkIGZvciBkIGluIGRpZmYgaWYgZFswXSBpbiBBTExPV10KCmZvciBrLCBhLCBiIGluIHNvZnQ6CiAgICBwcmludCgnICBbYWxsb3dlZF0gJS00MnMgc3RvY2s9JXMgIG5ldz0lcycgJSAoaywgYSwgYikpCgppZiBub3QgaGFyZDoKICAgIHByaW50KCkKICAgIHByaW50KCcgICoqKiBjb25maWcgaWRlbnRpY2FsIHRvIHN0b2NrIChleGNlcHQgYWxsb3dlZCkgKioqJykKICAgIHN5cy5leGl0KDApCgpwcmludCgpCnByaW50KCcgICEhICVkIHVuZXhwZWN0ZWQgZGlmZmVyZW5jZXMgKGZpcnN0IDQwKTonICUgbGVuKGhhcmQpKQpmb3IgaywgYSwgYiBpbiBoYXJkWzo0MF06CiAgICBwcmludCgnICAgICUtNDZzIHN0b2NrPSUtMjBzIG5ldz0lcycgJSAoaywgYSwgYikpCmlmIGxlbihoYXJkKSA+IDQwOgogICAgcHJpbnQoJyAgICAuLi4gJWQgbW9yZScgJSAobGVuKGhhcmQpIC0gNDApKQoKcHJpbnQoKQpwcmludCgnICA9PT0gZm9jdXMgY2hlY2sgPT09JykKZm9yIHByZSBpbiAoJ0NPTkZJR19UT1VDSFBBTkVMXycsICdDT05GSUdfRFJNX1BBTkVMXycsICdDT05GSUdfT1BMVVNfJyk6CiAgICBhID0gc3VtKDEgZm9yIGsgaW4gbnMgaWYgay5zdGFydHN3aXRoKHByZSkgYW5kIG5zW2tdID09ICd5JykKICAgIGIgPSBzdW0oMSBmb3IgayBpbiBubyBpZiBrLnN0YXJ0c3dpdGgocHJlKSBhbmQgbm9ba10gPT0gJ3knKQogICAgZmxhZyA9ICdPSycgaWYgYSA9PSBiIGVsc2UgJyEhIGxvc3QgJWQnICUgKGEgLSBiKQogICAgcHJpbnQoJyAgICAlLTI4cyBzdG9jayAlM2QgPXkgICBwcm9kdWN0ICUzZCA9eSAgICVzJyAlIChwcmUsIGEsIGIsIGZsYWcpKQoKc3lzLmV4aXQoMikK' | base64 -d > /tmp/verify_config.py
+          echo "===== embedded config vs stock ====="
+          python3 /tmp/verify_config.py out/arch/arm64/boot/Image
+          RC=$?
+          if [ "$RC" -eq 1 ]; then
+            echo "!! product has no embedded config, cannot verify, abort"
+            exit 1
+          fi
+          if [ "$RC" -eq 2 ]; then
+            echo ""
+            echo "!! config differs from stock -- listed above"
+            echo "!! this image would lose drivers or change behavior, not shipping"
+            exit 1
+          fi
+          echo "verify passed"
 
       - name: Package
         if: always()
@@ -492,91 +151,24 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
           cd out/arch/arm64/boot 2>/dev/null || { echo "no boot dir"; exit 0; }
           if [ -f Image.gz ]; then
-            cp Image.gz "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"; echo "used Image.gz"
+            cp Image.gz "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"
+            echo "used Image.gz"
           elif [ -f Image ]; then
-            gzip -9 -c Image > "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"; echo "gzipped Image"
+            gzip -9 -c Image > "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"
             cp Image "$GITHUB_WORKSPACE/artifacts/kernel_Image.raw"
+            echo "gzipped Image"
           else
-            echo "!! 无内核镜像"
+            echo "!! no kernel image"
           fi
-          ls -la "$GITHUB_WORKSPACE/artifacts/" || true
-          cp "$GITHUB_WORKSPACE/out/.config" "$GITHUB_WORKSPACE/artifacts/kernel.config" 2>/dev/null || true
-          cp System.map "$GITHUB_WORKSPACE/artifacts/kernel.System.map" 2>/dev/null || true
-          cp /tmp/build.log "$GITHUB_WORKSPACE/artifacts/build.log" 2>/dev/null || true
-          # ★ 把 module_layout 的 CRC 带出来 —— 这是 vendor .ko 能否加载的唯一判据
-          # 原厂 ko 的 __versions 段里存着它期望的 CRC；内核 CRC 不一致就报
-          # "disagrees about version of symbol module_layout" → Exec format error
-          cp "$GITHUB_WORKSPACE/out/Module.symvers" "$GITHUB_WORKSPACE/artifacts/Module.symvers" 2>/dev/null || true
-          echo "=== module_layout CRC (关键校验值) ==="
-          grep -iE '\bmodule_layout\b' "$GITHUB_WORKSPACE/out/Module.symvers" 2>/dev/null || echo "(Module.symvers 里没找到 module_layout)"
-          echo "=== 全部导出符号数 ==="
-          wc -l "$GITHUB_WORKSPACE/out/Module.symvers" 2>/dev/null || true
-
-          # ★★★ 探针：量 sizeof(struct module) ★★★
-                    echo ""
-          echo "=== 探针A：wlan 驱动源码在不在树里 ==="
-          for d in \
-            drivers/misc/mediatek/connectivity/wlan \
-            drivers/misc/mediatek/connectivity/wlan/gen4m \
-            drivers/misc/mediatek/connectivity/wlan/core \
-            drivers/misc/mediatek/connectivity/common \
-            ../vendor/oplus/kernel/connectivity \
-            ; do
-            if [ -d "$d" ]; then
-              echo "  [有] $d  ($(find "$d" -name '*.c' 2>/dev/null | wc -l) 个 .c)"
-            else
-              echo "  [无] $d"
-            fi
-          done
-          echo "--- 全树搜 wlan 相关 .c ---"
-          find . ../vendor -name '*wlan*' -name '*.c' 2>/dev/null | head -15
-          echo "--- 全树搜 gl_/wlan driver 关键函数 ---"
-          grep -rl 'glRegisterWlan' . ../vendor --include=*.c 2>/dev/null | head -5
-
-          echo ""
-          echo "=== 探针C：内核树里指向 vendor 的 symlink（这是接入点）==="
-          find . -maxdepth 5 -type l 2>/dev/null | while read -r l; do
-            t=$(readlink "$l" 2>/dev/null)
-            case "$t" in
-              *vendor*) echo "  $l -> $t" ;;
-            esac
-          done | head -40
-          echo "--- touchpanel 相关的 symlink ---"
-          find . -maxdepth 6 -type l 2>/dev/null | grep -i touch | while read -r l; do
-            echo "  $l -> $(readlink "$l" 2>/dev/null)"
-          done | head -20
-          echo "--- drivers/input/touchscreen 下的实体/symlink ---"
-          ls -la drivers/input/touchscreen/ 2>/dev/null | grep -iE 'oplus|touch' | head -10
-
-          echo ""
-          echo "=== 探针B：原厂 ko 里哪些符号 CRC 变了（关键结论）==="
-          echo "（这决定能否靠重编 ko 修复）"
-
-          # ★★★ 探针：量 sizeof(struct module) ★★★
-          export PATH="$CLANG_DIR/bin:$PATH"
-          PROBE=/tmp/probe
-          rm -rf "$PROBE"; mkdir -p "$PROBE"
-          # 用 base64 写文件，绕开 YAML heredoc 缩进问题（这个项目的老坑）
-          echo 'I2luY2x1ZGUgPGxpbnV4L21vZHVsZS5oPgojaW5jbHVkZSA8bGludXgva2VybmVsLmg+Ck1PRFVMRV9MSUNFTlNFKCJHUExJIik7CnN0YXRpYyBpbnQgX19pbml0IHBfaW5pdCh2b2lkKSB7IHJldHVybiAwOyB9CnN0YXRpYyB2b2lkIF9fZXhpdCBwX2V4aXQodm9pZCkgeyB9Cm1vZHVsZV9pbml0KHBfaW5pdCk7Cm1vZHVsZV9leGl0KHBfZXhpdCk7Cg==' | base64 -d > "$PROBE/probe.c"
-          echo 'b2JqLW0gOj0gcHJvYmUubwo=' | base64 -d > "$PROBE/Makefile"
-          cat "$PROBE/probe.c"
-          make -C "$GITHUB_WORKSPACE/out" M="$PROBE" \
-               ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-               CC="clang --target=aarch64-linux-gnu" \
-               LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
-               modules 2>&1 | tail -5 || echo "(probe 编译失败)"
-          if [ -f "$PROBE/probe.ko" ]; then
-            cp "$PROBE/probe.ko" "$GITHUB_WORKSPACE/artifacts/probe.ko"
-            echo "--- probe.ko 的 this_module 段大小（关键！应为 1024）---"
-            (llvm-readelf -S -W "$PROBE/probe.ko" 2>/dev/null || readelf -S -W "$PROBE/probe.ko") | grep -i 'this_module'
-          else
-            echo "(probe.ko 没生成)"
+          if [ -f ../../../.config ]; then
+            cp ../../../.config "$GITHUB_WORKSPACE/artifacts/out.config" || true
           fi
+          ls -la "$GITHUB_WORKSPACE/artifacts" || true
 
       - name: Upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-output
-          path: artifacts/
+          name: pjs110-kernel
+          path: ${{ github.workspace }}/artifacts/*
           if-no-files-found: warn

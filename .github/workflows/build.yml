@@ -199,6 +199,19 @@ jobs:
             echo "  [ok] sy6529 parens fixed"
           fi
 
+          # D10. imgsensor 死引用：引用的传感器目录没有 Makefile 就注释掉该行
+          #      （v7 实测：ov16a1q_mipi_raw_hawaii 缺 Makefile，No rule to make target）
+          DS=drivers/misc/mediatek/imgsensor/src
+          for mk in $(grep -rl 'v1_1/' "$DS" --include=Makefile 2>/dev/null); do
+            for ref in $(grep -hoE '\.\./common/v1_1/[A-Za-z0-9_]+' "$mk" | sort -u); do
+              name=${ref##*/}
+              if [ -n "$name" ] && [ ! -f "$DS/common/v1_1/$name/Makefile" ]; then
+                sed -i "\\|$name|s|^|# [pjs110] missing makefile: |" "$mk"
+                echo "  [ok] $mk: commented missing sensor $name"
+              fi
+            done
+          done
+
           [ "$fail" -eq 0 ] && echo "PATCH OK" || { echo "!! patch failed"; exit 1; }
 
       - name: Build

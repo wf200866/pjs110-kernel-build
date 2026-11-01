@@ -4,6 +4,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 95
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
@@ -44,28 +45,35 @@ jobs:
           sudo apt-get install -y -qq make libncurses-dev flex bison libssl-dev bc \
                                     cpio lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
           set -e
-          # 能开机那版是 clang 14.0.7 (r450784e)，照抄
-          CLANG_DIR="$HOME/clang-r450784e"
+          # 目标：clang 14.0.x（能开机那版是 14.0.7 / r450784e）
+          # v7 实测：git 预构建源 404、llvm 官方没有 ubuntu-18.04 变体 → 用官方 rhel-8.4 包
+          #          （glibc 向前兼容：RHEL8.4=glibc2.28 < Ubuntu22.04=glibc2.35，能跑）
+          CLANG_DIR="$HOME/clang-14"
           rm -rf "$CLANG_DIR"
-          echo "  fetching clang 14.0.7 (r450784e)..."
+          echo "  fetching clang+llvm 14.0.6 (official rhel-8.4 prebuilt, 602MB)..."
           OK=0
-          for REPO_CLONE in \
-            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r450784e.git \
-            https://github.com/DerpFest-AOSP/prebuilts_clang_kernel_linux-x86_clang-r450784e.git ; do
-            if git clone --depth 1 "$REPO_CLONE" "$CLANG_DIR" 2>&1 | tail -2; then
-              if [ -x "$CLANG_DIR/bin/clang" ]; then OK=1; break; fi
+          if curl -sL --retry 3 --max-time 540 -o /tmp/clang.tar.xz \
+            https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/clang+llvm-14.0.6-x86_64-linux-gnu-rhel-8.4.tar.xz \
+            && [ -s /tmp/clang.tar.xz ]; then
+            mkdir -p "$CLANG_DIR"
+            if tar xJf /tmp/clang.tar.xz -C "$CLANG_DIR" --strip-components=1 2>/dev/null; then
+              if [ -x "$CLANG_DIR/bin/clang" ] && [ -x "$CLANG_DIR/bin/ld.lld" ]; then OK=1; fi
             fi
-            rm -rf "$CLANG_DIR"
-          done
+          fi
+          rm -f /tmp/clang.tar.xz
           if [ "$OK" != "1" ]; then
-            echo "  [warn] prebuilt clone failed, installing apt clang"
+            echo "  [warn] tarball failed, fallback to apt clang-14"
             sudo apt-get install -y -qq clang-14 lld-14
-            CLANG_DIR=""
+            rm -rf "$CLANG_DIR"; mkdir -p "$CLANG_DIR/bin"
+            for t in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
+              SRC=$(command -v $t-14 || command -v $t) || true
+              [ -n "$SRC" ] && ln -sf "$SRC" "$CLANG_DIR/bin/$t" || true
+            done
+            test -x "$CLANG_DIR/bin/clang" || { echo "!! apt fallback failed"; exit 1; }
+            "$CLANG_DIR/bin/clang" --version | head -1
           fi
-          if [ -n "$CLANG_DIR" ]; then
-            echo "$CLANG_DIR/bin" >> $GITHUB_PATH
-          fi
-          PATH="${CLANG_DIR:+$CLANG_DIR/bin:}$PATH" clang --version | head -3
+          echo "$CLANG_DIR/bin" >> $GITHUB_PATH
+          "$CLANG_DIR/bin/clang" --version | head -3
 
       - name: Patch kernel source
         run: |
@@ -95,7 +103,7 @@ jobs:
 
       - name: Build
         run: |
-          export PATH="$HOME/clang-r450784e/bin:$PATH"
+          export PATH="$HOME/clang-14/bin:$PATH"
           export ARCH=arm64 SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
@@ -120,15 +128,50 @@ jobs:
           echo "--- MODULE_SIG family ---"
           grep -E 'CONFIG_MODULE_SIG' out/.config
 
+          # v7 教训：make 输出全吞进 /tmp/build.log 导致盲飞 6 小时。
+          # 现在：tee 实时进 Actions 日志 + 后台看门狗（5 分钟无进展就杀 make，快速失败）
           KCF="-I$PWD/drivers/misc/mediatek/scp/include -I$PWD/drivers/misc/mediatek/include -Wno-error=date-time -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces -Wno-error=builtin-declaration-mismatch -Wno-error=ignored-optimization-argument -Wno-ignored-optimization-argument -Wno-error=unknown-warning-option -Wno-unknown-warning-option -Wno-error=unused-command-line-argument -Wno-unused-command-line-argument"
+          export KCFLAGS="$KCF"
+
+          echo "=== watchdog start ==="
+          ( START=$(date +%s)
+            HAVE=0; LASTNEW=0; i=0
+            while true; do
+              sleep 60
+              i=$((i+1))
+              ALL=$(find out -name '*.o' 2>/dev/null | wc -l)
+              BUSY=$(pgrep -c 'clang|ld.lld' 2>/dev/null || true)
+              echo "[watchdog] min=$i total_o=$ALL busy(compiler/linker)=$BUSY"
+              if [ "$ALL" -gt "$HAVE" ]; then HAVE=$ALL; LASTNEW=$i; fi
+              ELAPSED=$(( $(date +%s) - START ))
+              if [ "$BUSY" -eq 0 ]; then
+                IDLE=$(( i - LASTNEW ))
+                if { [ "$HAVE" -gt 0 ] && [ "$IDLE" -ge 5 ]; } || \
+                   { [ "$HAVE" -eq 0 ] && [ "$ELAPSED" -gt 900 ]; }; then
+                  echo "[watchdog] STALLED (idle_min=$IDLE elapsed_s=$ELAPSED) - dump and kill"
+                  ps -eo pid,ppid,etime,comm,args --sort=-etime | head -25 || true
+                  echo "[watchdog] --- build.log tail ---"
+                  tail -5 /tmp/build.log 2>/dev/null || true
+                  pkill -9 make || true
+                  pkill -9 bc   || true
+                  pkill -9 sh   || true
+                  pkill -9 clang || true
+                  break
+                fi
+              fi
+            done ) &
+          WD_PID=$!
+
           set +e
           make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
                CC="clang --target=aarch64-linux-gnu" \
                LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
                OBJDUMP=llvm-objdump READELF=llvm-readelf STRIP=llvm-strip \
-               -j$(nproc) Image.gz KCFLAGS="$KCF" > /tmp/build.log 2>&1
-          RC=$?
+               -j$(nproc) Image.gz 2>&1 | tee /tmp/build.log
+          RC=${PIPESTATUS[0]}
           set -e
+          kill $WD_PID 2>/dev/null || true
+
           echo "=== BUILD EXIT: $RC ==="
           grep -E "error:|fatal error:" /tmp/build.log | head -60 || true
           echo "=== last 30 ==="

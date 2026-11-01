@@ -172,6 +172,33 @@ jobs:
             echo "  [ok] futex.c handler calls masked (left: $(grep -c 'IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)' "$FUTEX_C" || echo 0))"
           fi
 
+          # D7. tp_devices.h 补 TP_VXN（touch.c 引用，v5 实测缺陷）
+          for TP in drivers/input/touchscreen/tp_devices.h \
+                    "$V/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"; do
+            if [ -f "$TP" ] && ! grep -q 'TP_VXN' "$TP"; then
+              awk 'done==0 && /TP_TXD,[ ]*$/ { print; n=$0; gsub(/TP_TXD/,"TP_VXN",n); print n; done=1; next } { print }' \
+                "$TP" > /tmp/tp.new && mv /tmp/tp.new "$TP"
+              echo "  [ok] $TP: TP_VXN $(grep -c TP_VXN "$TP")"
+            fi
+          done
+
+          # D8. sensor_devinfo.c 空参数补原型（v5 实测缺陷）
+          for SDI in "$V/oplus/sensor/kernel/oplus_sensor_devinfo/sensor_devinfo.c" \
+                     "$V/oplus/sensor/kernel/sensorhub/oplus_sensor_devinfo/sensor_devinfo.c"; do
+            if [ -f "$SDI" ] && ! grep -q 'register_lcdinfo_notifier(struct notifier_block' "$SDI"; then
+              sed -i 's/^__attribute__((weak)) int register_lcdinfo_notifier() {/__attribute__((weak)) int register_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
+              sed -i 's/^__attribute__((weak)) int unregister_lcdinfo_notifier() {/__attribute__((weak)) int unregister_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
+              echo "  [ok] sensor_devinfo prototype fixed: $SDI"
+            fi
+          done
+
+          # D9. sy6529 运算优先级括号（v5 实测缺陷）
+          SY="$V/oplus/kernel/charger/v1/voocphy/oplus_sy6529.c"
+          if [ -f "$SY" ]; then
+            sed -i 's/if (\*data == sy6529_CHARGE_MODE_2_1 | \*data == sy6529_CHARGE_MODE_1_1)/if ((*data == sy6529_CHARGE_MODE_2_1) | (*data == sy6529_CHARGE_MODE_1_1))/' "$SY"
+            echo "  [ok] sy6529 parens fixed"
+          fi
+
           [ "$fail" -eq 0 ] && echo "PATCH OK" || { echo "!! patch failed"; exit 1; }
 
       - name: Build

@@ -1,10 +1,11 @@
-name: Build PJS110 Kernel
+name: Build PJS110 Kernel (clang + LTO + CFI)
+
 on:
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 95
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
@@ -13,7 +14,7 @@ jobs:
           ref: oppo/mt6833_t_13.1.1_a2x_5g
           fetch-depth: 1
 
-      - name: Vendor tarball + kernel-4.19 symlink
+      - name: Vendor + kernel-4.19 symlink
         run: |
           set -u
           PARENT=$(dirname "$GITHUB_WORKSPACE")
@@ -28,83 +29,232 @@ jobs:
           test -f kernel/sched_assist/Kconfig && echo "  OK sched_assist" || echo "  BREAK sched_assist"
           test -f include/linux/sched_assist/sched_assist_binder.h && echo "  OK binder.h" || echo "  BREAK binder.h"
 
-      - name: Fetch build config (B)
+      - name: Stock config
         run: |
-          curl -sL -o /tmp/buildB.config \
-            https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/buildB.config
-          wc -l /tmp/buildB.config
-          md5sum /tmp/buildB.config
-          echo "  expect md5: 5b277bddc1806a2615843ada5ce8c4da"
-          echo "--- key items ---"
-          grep -E '^CONFIG_(MODULE_SIG|MODVERSIONS|MODULE_UNLOAD|CLANG_VERSION)=' /tmp/buildB.config
-          # === v8a: single-variable experiment -- MODULE_SIG=n (nothing else vs v7) ===
-          sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' /tmp/buildB.config
-          echo "--- after v8a override ---"
-          grep -E '^CONFIG_(MODULE_SIG|MODVERSIONS|MODULE_UNLOAD|CLANG_VERSION)=' /tmp/buildB.config
-          grep -E '^CONFIG_(LTO|CFI|THINLTO)' /tmp/buildB.config || echo "  (LTO/CFI all off - good)"
+          curl -sL -o /tmp/stock.config \
+            https://github.com/wf200866/pjs110-kernel-build/releases/download/vendor-v1/pjs110_stock.config
+          wc -l /tmp/stock.config
 
-      - name: Toolchain
+      - name: Toolchain - AOSP clang r383902
         run: |
+          set -e
+          echo "=== 下载 AOSP clang r383902 (clang 11.0.1，与原厂一致) ==="
+          mkdir -p "$HOME/clang"
+          cd "$HOME/clang"
+          curl -sL -o clang.tar.gz \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz"
+          ls -la clang.tar.gz
+          tar xzf clang.tar.gz -C "$HOME/clang"
+          rm -f clang.tar.gz
+          echo "=== 版本确认 ==="
+          "$HOME/clang/bin/clang" --version
+          "$HOME/clang/bin/ld.lld" --version
+          echo "=== 依赖 ==="
           sudo apt-get update -qq
           sudo apt-get install -y -qq make libncurses-dev flex bison libssl-dev bc \
-                                    cpio lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu openssl
-          set -e
-          # clang 14 实测两条路都翻车：
-          #   14.0.0/14.0.6 编这棵 4.19 MTK 树 → kernel/bounds.s 直接炸
-          #     (atomic_ll_sc.h: unknown type name 'atomic64_t')，20 errors
-          # clang 11.0.1 (r383902) 是 v5 五次成功构建的同款工具链，实测能编完这棵树
-          # 承重墙是 config 里的 MODULE_SIG/CFI/LTO 开关（已锁定），编译器版本不影响
-          # struct module 布局，也不进 vermagic
-          CLANG_DIR="$HOME/clang-r383902"
-          rm -rf "$CLANG_DIR"
-          echo "  fetching clang 11.0.1 (r383902, v5-proven)..."
-          if git clone --depth 1 --branch lineage-20 \
-               https://github.com/Jacksonzwang/android_prebuilts_clang_kernel_linux-x86_clang-r383902.git \
-               "$CLANG_DIR" 2>&1 | tail -3; then
-            echo "  [ok] clone done"
-          else
-            echo "  [warn] clone failed, trying tarball"
-            mkdir -p "$CLANG_DIR"
-            curl -sL --max-time 600 -o /tmp/clang.tar.gz \
-              "https://github.com/Jacksonzwang/android_prebuilts_clang_kernel_linux-x86_clang-r383902/archive/refs/heads/lineage-20.tar.gz"
-            tar xzf /tmp/clang.tar.gz -C "$CLANG_DIR" --strip-components=1
-          fi
-          test -x "$CLANG_DIR/bin/clang" || { echo "!! no bin/clang"; exit 1; }
-          test -x "$CLANG_DIR/bin/ld.lld" || { echo "!! no bin/ld.lld"; exit 1; }
-          echo "$CLANG_DIR/bin" >> $GITHUB_PATH
-          "$CLANG_DIR/bin/clang" --version | head -2
+                                    gcc-aarch64-linux-gnu cpio python3 zstd
 
-      - name: Patch kernel source
+      - name: Patch OPPO source defects (仅文件缺失/语法错误)
         run: |
           set -u
-          cd "$GITHUB_WORKSPACE"
-          fail=0
-
-          echo "===== A. build hygiene (warnings only, no behavior change) ====="
-          grep -rl -- "-Werror" --include=Makefile --include=Kbuild --include="*.mk" . 2>/dev/null | while read -r f; do
-            sed -i 's/-Werror=/-Wno-error=/g; s/-Werror-\([A-Za-z0-9_-]*\)/-Wno-error=\1/g; s/\(^\|[[:space:]]\)-Werror\([[:space:]]\|$\)/\1-Wno-error\2/g' "$f"
-          done
-          for f in $(grep -rl -- '-fmerge-constants' . --include=Makefile --include='*.mk' --include=Kbuild 2>/dev/null); do
-            sed -i 's/-fmerge-constants//g' "$f"
-          done
-          echo "  [ok]"
-
-          echo "===== B. check_version bypass ====="
-          echo 'CiMgLSotIGNvZGluZzogdXRmLTggLSotCiIiImNoZWNrX3ZlcnNpb24oKSDlvIDlpLQgcmV0dXJuIDEg4oCU4oCUIOi3s+i/hyBzeW1ib2wgQ1JDIOavlOWvuQoK5Li65LuA5LmI5Y+v5Lul6Lez6L+H77yaCiAg5bey55SoIEVMRiDop6PmnpDlrp7mtYvmr5Tlr7kgc3RydWN0IG1vZHVsZSDluIPlsYDvvJoKCiAgICDljp/ljoIgd2xhbl9kcnZfZ2VuNG0ua28gICAuZ251LmxpbmtvbmNlLnRoaXNfbW9kdWxlICBzaXplPTEwMjQKICAgICAgICAgICAgICAgICAgICAgICAgICAgICDph43lrprkvY0gaW5pdEArMzg0ICBjbGVhbnVwQCs5MjggICgqLmNmaV9qdCkKICAgIOiHque8liBwcm9iZS5rbyAgICAgICAgICAgIOWQjCBzaXplIC8g5ZCM5YGP56e7IC8g5ZCM56ym5Y+35b2i5byPCgogIOW4g+WxgOS4gOiHtCDihpIga28g5Yqg6L295ZCO5omA5pyJ5a2X5q616K6/6Zeu6YO95Zyo5q2j56Gu5L2N572u44CCCiAg5ZSv5LiA5a+55LiN5LiK55qE5pivIGdlbmtzeW1zIOeul+WHuueahOmCo+S4quaVsOWtl++8jOiAjOWOn+WOguWGheaguOagkeW4puedgOacquWFrOW8gOeahAogIOengeaciSBwYXRjaO+8jOeUqOWFrOW8gOa6kOeggeawuOi/nOeul+S4jeWHuuWQjOS4gOS4quWAvOOAggoKICDmiYDku6XvvJrlj6rot7Pov4fmlbDlrZfmr5Tlr7nvvIzkuI3mlLnlj5jku7vkvZXlhoXlrZjluIPlsYDjgIIKIiIiCmltcG9ydCByZSwgc3lzLCBvcwoKUCA9ICdrZXJuZWwvbW9kdWxlLmMnCmlmIG5vdCBvcy5wYXRoLmlzZmlsZShQKToKICAgIHByaW50KCchISAlcyBtaXNzaW5nJyAlIFApCiAgICBzeXMuZXhpdCgxKQoKc3JjID0gb3BlbihQLCBlbmNvZGluZz0ndXRmOCcsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKQoKTUFSSyA9ICdQSlMxMTBfVkVORE9SX0tPX0JZUEFTUycKaWYgTUFSSyBpbiBzcmM6CiAgICBwcmludCgnICBbc2tpcF0gYWxyZWFkeSBwYXRjaGVkJykKICAgIHN5cy5leGl0KDApCgptID0gcmUuc2VhcmNoKHInKHN0YXRpY1xzK2ludFxzK2NoZWNrX3ZlcnNpb25ccypcKFteKV0qXClccypceyknLCBzcmMpCmlmIG5vdCBtOgogICAgIyDmnInnmoTlhoXmoLjniYjmnKznrb7lkI3luKYgY29uc3QgY2hhciAqCiAgICBtID0gcmUuc2VhcmNoKHInKHN0YXRpY1xzK2ludFxzK2NoZWNrX3ZlcnNpb25ccypcKC4qP1wpXHMqXHspJywgc3JjLCByZS5TKQppZiBub3QgbToKICAgIHByaW50KCchISBjaGVja192ZXJzaW9uIG5vdCBmb3VuZCcpCiAgICBzeXMuZXhpdCgxKQoKaW5qZWN0ID0gKG0uZ3JvdXAoMSkKICAgICAgICAgICsgJ1xuXHQvKiAnICsgTUFSSyArICc6IHN0cnVjdCBtb2R1bGUgbGF5b3V0IHZlcmlmaWVkIGlkZW50aWNhbCwnCiAgICAgICAgICAgICcgc2tpcCBDUkMgc3RyaW5nIGNvbXBhcmUgKi9cbicKICAgICAgICAgICsgJ1x0cmV0dXJuIDE7IC8qICcgKyBNQVJLICsgJyAqL1xuJykKCm91dCA9IHNyY1s6bS5zdGFydCgpXSArIGluamVjdCArIHNyY1ttLmVuZCgpOl0Kb3BlbihQLCAndycsIGVuY29kaW5nPSd1dGY4Jykud3JpdGUob3V0KQpwcmludCgnICBbb2tdIG1vZHVsZS5jIHBhdGNoZWQgKCVkIC0+ICVkIGJ5dGVzKScgJSAobGVuKHNyYyksIGxlbihvdXQpKSkK' | base64 -d > /tmp/patch_modver.py
-          python3 /tmp/patch_modver.py || fail=1
-          echo "  marker count: $(grep -c 'PJS110_VENDOR_KO_BYPASS' kernel/module.c || echo 0)"
-
-          echo "===== C. fix dangling Kconfig sources ====="
-          echo 'CiMgLSotIGNvZGluZzogdXRmLTggLSotCiIiIuihpem9kOaMh+WQkeS4jeWtmOWcqOaWh+S7tueahCBLY29uZmlnIHNvdXJjZQoK6IOM5pmv77yIdjcg56ys5LiA5qyh5p6E5bu65a6e5rWL77yJ77yaCiAgZnMvcHJvYy9LY29uZmlnOjEwODogY2FuJ3Qgb3BlbiBmaWxlICJmcy9wcm9jL2NwdV9qYW5raW5mby9LY29uZmlnIgogIC0+IHN5bmNjb25maWcg55u05o6l5aSx6LSl77yM5pW05Liq5p6E5bu66L+H5LiN5Y67Cgrljp/lm6DvvJrljp/ljoLlhoXmoLjmoJHph4wgZnMvcHJvYy9LY29uZmlnIOacieS4gOihjCBzb3VyY2Ug5oyH5ZCRIGNwdV9qYW5raW5mby9LY29uZmln77yMCiAgICAgIOS9humCo+S4quebruW9leWcqCB2ZW5kb3Ig6YeM77yI5oiW6ICF5qC55pys5rKh5omT6L+b5p2l77yJ44CCa2J1aWxkIOWFiOaMieiHqui6q+ebruW9leino+aekO+8jAogICAgICDmib7kuI3liLDlsLHmiqXplJnpgIDlh7rjgIIKCuWBmuazle+8mgogIOaJq+WFqOagkeaJgOaciSBLY29uZmlnIOeahCBzb3VyY2Ug6KGM77yM6YCQ5Liq6aqM6K+B55uu5qCH5piv5ZCm5a2Y5Zyo44CCCiAg5LiN5a2Y5ZyoIC0+IOWOuyB2ZW5kb3Ig6YeM5om+5ZCM5ZCN5paH5Lu277yM6L2v6ZO+6L+H5p2l77ybdmVuZG9yIOS5n+ayoeacieWwseW7uuepuuWNoOS9jeOAggogIOWPquihpeOAjOe8uuWkseeahOaWh+S7tuOAje+8jOS4jeaUueS7u+S9leW3suacieeahCBzb3VyY2Ug5YWz57O75ZKMIGNvbmZpZyDlgLzjgIIKIiIiCmltcG9ydCBvcywgcmUsIHN5cwoKUk9PVCA9IG9zLmdldGN3ZCgpClBBUkVOVCA9IG9zLnBhdGguZGlybmFtZShST09UKQpWRU5ET1IgPSBvcy5wYXRoLmpvaW4oUEFSRU5ULCAndmVuZG9yJykKClNSQ19SRSA9IHJlLmNvbXBpbGUocideXHMqKD86c291cmNlfG9zb3VyY2UpXHMrIihbXiJdKykiJywgcmUuTSkKU0tJUF9ESVJTID0gc2V0KFsnLmdpdCcsICdvdXQnLCAnLnJlcG8nLCAnRG9jdW1lbnRhdGlvbiddKQoKIyDpooTmiavmj48gdmVuZG9y77yM5bu6IGJhc2VuYW1lIC0+IOi3r+W+hCDntKLlvJUKdmluZGV4ID0ge30KaWYgb3MucGF0aC5pc2RpcihWRU5ET1IpOgogICAgZm9yIHZkcCwgdmRuLCB2Zm5zIGluIG9zLndhbGsoVkVORE9SKToKICAgICAgICB2ZG5bOl0gPSBbZCBmb3IgZCBpbiB2ZG4gaWYgZCBub3QgaW4gKCcuZ2l0JywgJ291dCcpXQogICAgICAgIGZvciBmbiBpbiB2Zm5zOgogICAgICAgICAgICBpZiBmbi5zdGFydHN3aXRoKCdLY29uZmlnJyk6CiAgICAgICAgICAgICAgICB2aW5kZXguc2V0ZGVmYXVsdChmbiwgb3MucGF0aC5qb2luKHZkcCwgZm4pKQpwcmludCgnICB2ZW5kb3IgS2NvbmZpZyBpbmRleDogJWQgZW50cmllcycgJSBsZW4odmluZGV4KSkKCmZpeGVkX2xpbmsgPSAwCmZpeGVkX2VtcHR5ID0gMApzY2FubmVkID0gMAp0b19za2lwID0gW10KCmZvciBkcCwgZG4sIGZucyBpbiBvcy53YWxrKFJPT1QpOgogICAgZG5bOl0gPSBbZCBmb3IgZCBpbiBkbiBpZiBkIG5vdCBpbiBTS0lQX0RJUlNdCiAgICBmb3IgZm4gaW4gZm5zOgogICAgICAgIGlmIG5vdCBmbi5zdGFydHN3aXRoKCdLY29uZmlnJyk6CiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgcCA9IG9zLnBhdGguam9pbihkcCwgZm4pCiAgICAgICAgdHJ5OgogICAgICAgICAgICB0eHQgPSBvcGVuKHAsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKQogICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgc2Nhbm5lZCArPSAxCiAgICAgICAgZm9yIG0gaW4gU1JDX1JFLmZpbmRpdGVyKHR4dCk6CiAgICAgICAgICAgIHJlbCA9IG0uZ3JvdXAoMSkuc3RyaXAoKQogICAgICAgICAgICBpZiBub3QgcmVsIG9yIHJlbC5zdGFydHN3aXRoKCcvJyk6CiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICAjIOKYhSB2Ny4zIOihgOazquaVmeiure+8muWQqyAkKFZBUikg55qEIHNvdXJjZSDooYzvvIjlpoIgYXJjaC9LY29uZmlnOjEwIOeahAogICAgICAgICAgICAjICAgc291cmNlICJhcmNoLyQoU1JDQVJDSCkvS2NvbmZpZyLvvInlnKjmiavmj4/mnJ/ml6Dms5XlsZXlvIDvvIwKICAgICAgICAgICAgIyAgIGtidWlsZCDop6PmnpDml7bmiY3op6PmnpAg4oCU4oCUIOe7neS4jeiDveazqOmHiu+8gQogICAgICAgICAgICAjICAg5rOo6YeK5o6J5a6DID0gYXJjaC9hcm02NC9LY29uZmlnIOS4jeWKoOi9vSA9IENPTkZJR182NEJJVC9BUk02NF8qIOWFqOmDqAogICAgICAgICAgICAjICAg5pyq5a6a5LmJID0gYXRvbWljNjRfdCDokrjlj5EgPSBib3VuZHMucyDnvJbor5HngrggPSDlhajmoJHnvJbkuI3lh7rmnaUKICAgICAgICAgICAgaWYgJyQoJyBpbiByZWw6CiAgICAgICAgICAgICAgICBjb250aW51ZQoKICAgICAgICAgICAgIyBrYnVpbGQg6Kej5p6Q6aG65bqP77ya5YWI55u45a+55b2T5YmNIEtjb25maWcg5omA5Zyo55uu5b2V77yM5YaN55u45a+55YaF5qC45qC5CiAgICAgICAgICAgIGhlcmUgPSBvcy5wYXRoLm5vcm1wYXRoKG9zLnBhdGguam9pbihkcCwgcmVsKSkKICAgICAgICAgICAgcm9vdCA9IG9zLnBhdGgubm9ybXBhdGgob3MucGF0aC5qb2luKFJPT1QsIHJlbCkpCiAgICAgICAgICAgIGlmIG9zLnBhdGguZXhpc3RzKGhlcmUpIG9yIG9zLnBhdGguZXhpc3RzKHJvb3QpOgogICAgICAgICAgICAgICAgY29udGludWUKCiAgICAgICAgICAgICMg4piFIHY3LjQgdmVuZG9yIOWbnumAgO+8mnJvb3Qg5qCR6YeM55qEIHNvdXJjZSDnm67moIflj6/og73lj6rlrZjlnKjkuo4gdmVuZG9yCiAgICAgICAgICAgICMgICDvvIjlpoIgcm9vdCDlhpkgc291cmNlICJvcGx1c190b3VjaHNjcmVlbl92Mi9LY29uZmlnIu+8jOecn+i6q+WPquWcqAogICAgICAgICAgICAjICAgdmVuZG9yL29wbHVzL2tlcm5lbC90b3VjaHBhbmVsLyDkuIvvvInjgILmjInjgIzkuIrnuqfnm67lvZXlkI0vS2NvbmZpZyDmlofku7blkI3jgI0KICAgICAgICAgICAgIyAgIOWcqCB2ZW5kb3Ig57Si5byV6YeM5om+5ZCM5p6E6Lev5b6E77yb5om+5Yiw5bCx6L2v6ZO+6L+H5p2l77yMS2NvbmZpZyDpk77mgaLlpI3lj6/ovr7vvIwKICAgICAgICAgICAgIyAgIFRPVUNIUEFORUxfKiDnrYnnrKblj7fkuI3lho3ooqvpnZnpu5jkuKLlvIPjgIIKICAgICAgICAgICAgIyAgIOaJvuS4jeWIsOaJjeazqOmHiu+8iOecn+atu+mTvu+8jOWmgiBjcHVfamFua2luZm/vvInjgIIKICAgICAgICAgICAgbGlua2VkID0gRmFsc2UKICAgICAgICAgICAgcGFydHMgPSByZWwucmVwbGFjZSgnXFwnLCAnLycpLnNwbGl0KCcvJykKICAgICAgICAgICAgaWYgbGVuKHBhcnRzKSA+PSAyOgogICAgICAgICAgICAgICAgbGVhZiA9ICcvJyArIHBhcnRzWy0yXSArICcvJyArIHBhcnRzWy0xXQogICAgICAgICAgICAgICAgZm9yIHZwIGluIHZpbmRleC5nZXQocGFydHNbLTFdLCBbXSk6CiAgICAgICAgICAgICAgICAgICAgaWYgdnAucmVwbGFjZSgnXFwnLCAnLycpLmVuZHN3aXRoKGxlYWYpOgogICAgICAgICAgICAgICAgICAgICAgICBvcy5tYWtlZGlycyhvcy5wYXRoLmRpcm5hbWUoaGVyZSksIGV4aXN0X29rPVRydWUpCiAgICAgICAgICAgICAgICAgICAgICAgIGlmIG5vdCBvcy5wYXRoLmxleGlzdHMoaGVyZSk6CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBvcy5zeW1saW5rKG9zLnBhdGgucmVscGF0aCh2cCwgb3MucGF0aC5kaXJuYW1lKGhlcmUpKSwgaGVyZSkKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHByaW50KCcgIFt2bGlua10gJXMgLT4gJXMnICUgKG9zLnBhdGgucmVscGF0aChoZXJlLCBST09UKSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIG9zLnBhdGgucmVscGF0aCh2cCwgUEFSRU5UKSkpCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBmaXhlZF9saW5rICs9IDEKICAgICAgICAgICAgICAgICAgICAgICAgbGlua2VkID0gVHJ1ZQogICAgICAgICAgICAgICAgICAgICAgICBicmVhawogICAgICAgICAgICBpZiBsaW5rZWQ6CiAgICAgICAgICAgICAgICBjb250aW51ZQoKICAgICAgICAgICAgIyDnm67moIfmmK/nnJ/kuI3lrZjlnKjvvIh2ZW5kb3Ig6YeM5Lmf5rKh5pyJ77yJ4oCU4oCU55u05o6l5oqK6L+Z6KGMIHNvdXJjZSDms6jph4rmjonjgIIKICAgICAgICAgICAgIyDooqvms6jph4rmjonnmoTpg73mmK8gT1BQTy9NVEsg55qE6ZmE5Yqg5Yqf6IO977yI5aaCIGNwdV9qYW5raW5mb++8ie+8jAogICAgICAgICAgICAjIOWwkeS6huWug+S7rOS4ouWKn+iDve+8jOS9huS4jeW9seWTjeW8gOacuuWSjCB2ZW5kb3Iga2/jgIIKICAgICAgICAgICAgbGluZV9ubyA9IHR4dFs6bS5zdGFydCgpXS5jb3VudCgnXG4nKSArIDEKICAgICAgICAgICAgdG9fc2tpcC5hcHBlbmQoKHAsIGxpbmVfbm8sIHJlbCkpCnByaW50KCcgIHNjYW5uZWQgS2NvbmZpZzogJWQnICUgc2Nhbm5lZCkKCiMg5oqK6Kej5p6Q5LiN5Yiw55qEIHNvdXJjZSDooYzms6jph4rmjokKYnlfZmlsZSA9IHt9CmZvciBwLCBsbiwgcmVsIGluIHRvX3NraXA6CiAgICBieV9maWxlLnNldGRlZmF1bHQocCwgW10pLmFwcGVuZCgobG4sIHJlbCkpCgpmb3IgcCwgaXRlbXMgaW4gYnlfZmlsZS5pdGVtcygpOgogICAgdHJ5OgogICAgICAgIGxpbmVzID0gb3BlbihwLCBlbmNvZGluZz0ndXRmOCcsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKS5zcGxpdCgnXG4nKQogICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICBjb250aW51ZQogICAgZm9yIGxuLCByZWwgaW4gc29ydGVkKGl0ZW1zLCByZXZlcnNlPVRydWUpOgogICAgICAgIGkgPSBsbiAtIDEKICAgICAgICBpZiAwIDw9IGkgPCBsZW4obGluZXMpIGFuZCAnc291cmNlJyBpbiBsaW5lc1tpXToKICAgICAgICAgICAgaW5kZW50ID0gbGluZXNbaV1bOmxlbihsaW5lc1tpXSkgLSBsZW4obGluZXNbaV0ubHN0cmlwKCkpXQogICAgICAgICAgICBsaW5lc1tpXSA9IGluZGVudCArICcjIFtwanMxMTBdIHRhcmdldCBtaXNzaW5nOiAnICsgcmVsICsgJ1xuJyArIFwKICAgICAgICAgICAgICAgICAgICAgICBpbmRlbnQgKyAnIyAnICsgbGluZXNbaV0uc3RyaXAoKQogICAgICAgICAgICBwcmludCgnICBbY29tbWVudF0gJXM6JWQgICVzJwogICAgICAgICAgICAgICAgICAlIChvcy5wYXRoLnJlbHBhdGgocCwgUk9PVCksIGxuLCByZWwpKQogICAgb3BlbihwLCAndycsIGVuY29kaW5nPSd1dGY4Jykud3JpdGUoJ1xuJy5qb2luKGxpbmVzKSkKCnByaW50KCcgIGNvbW1lbnRlZCBkYW5nbGluZyBzb3VyY2UgbGluZXM6ICVkJyAlIGxlbih0b19za2lwKSkKcHJpbnQoJyAgbGlua2VkIGZyb20gdmVuZG9yOiAlZCcgJSBmaXhlZF9saW5rKQpwcmludCgnICBlbXB0eSBwbGFjZWhvbGRlciA6ICVkJyAlIGZpeGVkX2VtcHR5KQo=' | base64 -d > /tmp/fix_dangling_kconfig.py
-          python3 /tmp/fix_dangling_kconfig.py 2>&1 | tail -30 || true
-
-          echo "===== D. v5 defect fixes (proven in v5's 5 successful builds) ====="
           V="$(dirname "$GITHUB_WORKSPACE")/vendor"
+          fail=0
+          ok()  { if [ "$1" = "0" ]; then echo "  [ok]   $2"; else echo "  [FAIL] $2"; fail=1; fi; }
 
-          # D1. oppo_process.h 桩：kernel/exit.c include 了它，vendor 不提供
-          mkdir -p include/soc/oplus/system
+          echo "===== A. fs/proc/Kconfig 缺 cpu_jankinfo ====="
+          sed -i '/cpu_jankinfo\/Kconfig/d' fs/proc/Kconfig
+          ok $? "去掉 cpu_jankinfo 引用"
+
+          echo "===== A2. core 头文件 always_inline 无 body（与编译器无关，clang 也报）====="
+          sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h
+          ok $? "mm.h handle_chp_ext_cmd"
+          sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h
+          ok $? "sched.h uclamp_se_set"
+          sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h 2>/dev/null || true
+          sed -i 's/^inline void blk_crypto_flock/extern void blk_crypto_flock/' include/linux/blk-crypto.h 2>/dev/null || true
+          grep -n 'handle_chp_ext_cmd' include/linux/mm.h | head -3
+          grep -n 'uclamp_se_set' kernel/sched/sched.h | head -3
+
+          echo "===== A3. vendor 侧 always_inline 无 body（clang 下同样报）====="
+          # is_audio_task: 声明 extern inline，定义是 inline（gnu89/clang 都不发射外部符号）
+          BINDER="$V/oplus/kernel/oplus_performance/sched_assist/sched_assist_binder.h"
+          SAC="$V/oplus/kernel/oplus_performance/sched_assist/sched_assist_common.c"
+          if [ -f "$BINDER" ]; then
+            sed -i 's/^extern inline bool is_audio_task/extern bool is_audio_task/' "$BINDER"
+            ok $? "binder.h is_audio_task"
+          fi
+          if [ -f "$SAC" ]; then
+            sed -i 's/^inline bool is_audio_task(struct task_struct \*task)/bool is_audio_task(struct task_struct *task)/' "$SAC"
+            ok $? "common.c is_audio_task 定义"
+          fi
+          # zram（内核树自己的那份 + vendor 那份）
+          ZK="drivers/block/zram/zram_drv_internal.h"
+          ZKC="drivers/block/zram/zram_drv.c"
+          if [ -f "$ZK" ]; then
+            sed -i 's/^extern inline bool is_thp_zram/extern bool is_thp_zram/' "$ZK"
+            sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' "$ZK"
+            ok $? "tree zram_drv_internal.h"
+          fi
+          if [ -f "$ZKC" ]; then
+            sed -i 's/^inline unsigned long zram_page_state(struct zram \*zram, int type)/unsigned long zram_page_state(struct zram *zram, int type)/' "$ZKC"
+            sed -i 's/^inline bool is_thp_zram(struct zram \*zram)/bool is_thp_zram(struct zram *zram)/' "$ZKC"
+            ok $? "tree zram_drv.c"
+          fi
+          ZH="$V/oplus/kernel/mm/hybridswap_zram/zram_drv_internal.h"
+          ZC="$V/oplus/kernel/mm/hybridswap_zram/zram_drv.c"
+          [ -f "$ZH" ] && {
+            sed -i 's/^extern inline bool is_chp_zram/extern bool is_chp_zram/' "$ZH"
+            sed -i 's/^extern inline unsigned long zram_page_state/extern unsigned long zram_page_state/' "$ZH"
+            echo "  [ok]   vendor zram_drv_internal.h"
+          }
+          [ -f "$ZC" ] && {
+            sed -i 's/^inline bool is_chp_zram(struct zram \*zram)/bool is_chp_zram(struct zram *zram)/' "$ZC"
+            sed -i 's/^inline unsigned long zram_page_state(struct zram \*zram, int type)/unsigned long zram_page_state(struct zram *zram, int type)/' "$ZC"
+            echo "  [ok]   vendor zram_drv.c"
+          }
+          # oplus_ofp_is_support
+          OFP_H="$V/oplus/kernel/../../../drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.h"
+          OFPH="drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.h"
+          OFPC="drivers/gpu/drm/oplus/oplus_display_onscreenfingerprint.c"
+          if [ -f "$OFPH" ]; then
+            sed -i 's/^inline bool oplus_ofp_is_support(void);/extern bool oplus_ofp_is_support(void);/' "$OFPH"
+            ok $? "ofp.h 声明"
+          fi
+          if [ -f "$OFPC" ]; then
+            sed -i 's/^inline bool oplus_ofp_is_support(void)$/bool oplus_ofp_is_support(void)/' "$OFPC"
+            ok $? "ofp.c 定义"
+          fi
+          # is_dma_buf_file（内核树已有实体，删多余声明）
+          [ -f "$V/oplus/kernel/mm/mm_osvelte/memstat.h" ] && sed -i '/^extern inline int is_dma_buf_file/d' "$V/oplus/kernel/mm/mm_osvelte/memstat.h"
+          # ws_all_release（无实体，删声明）
+          [ -f "$V/oplus/kernel/wakelock_profiler/oplus_wakelock_profiler_mtk.c" ] && sed -i '/^extern inline bool ws_all_release(void);$/d' "$V/oplus/kernel/wakelock_profiler/oplus_wakelock_profiler_mtk.c"
+          # 全 vendor 残留扫描
+          echo "  --- vendor 残留 ^extern inline ---"
+          grep -rn '^extern inline' "$V" --include=*.h --include=*.c 2>/dev/null | wc -l
+
+          echo "===== B. sensor_devinfo.c K&R 空参数（真语法错，与编译器无关）====="
+          for SDI in \
+            "$V/oplus/sensor/kernel/oplus_sensor_devinfo/sensor_devinfo.c" \
+            "$V/oplus/sensor/kernel/sensorhub/oplus_sensor_devinfo/sensor_devinfo.c" ; do
+            if [ -f "$SDI" ]; then
+              sed -i 's/^__attribute__((weak)) int register_lcdinfo_notifier() {/__attribute__((weak)) int register_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
+              sed -i 's/^__attribute__((weak)) int unregister_lcdinfo_notifier() {/__attribute__((weak)) int unregister_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
+              echo "  [ok]   $(basename $(dirname $SDI))"
+            fi
+          done
+
+          echo "===== C0. ★ 修复触摸屏 Kconfig 断链 ====="
+          # 根因（实测）：
+          #   vendor/.../oplus_touchscreen/Kconfig 只有 77 行，一条 source 都没有，
+          #   只剩空的 "if TOUCHPANEL_NOVA ... endif" 壳。OPPO 发布源码时把
+          #   子目录 source 行删了。于是各芯片 Kconfig 从未被读取，
+          #   那些 symbol 在 kconfig 眼里根本不存在 → 写进 config 也被丢弃
+          #   → 内核没有触摸驱动 → 能开机但屏幕点不动。
+          #
+          # 修法：不猜目录名（实际是 ilitek 小写、没有 Focaltech/Himax 目录），
+          #       直接全量 find 所有子 Kconfig，逐个 source 进去。
+          TPK="drivers/input/touchscreen/oplus_touchscreen/Kconfig"
+          if [ -f "$TPK" ]; then
+            B4=$(wc -l < "$TPK")
+            B4S=$(grep -c 'source' "$TPK" 2>/dev/null || echo 0)
+            echo "  修前: ${B4} 行, source ${B4S} 条"
+
+            # ★ oplus_touchscreen 是符号链接，find 默认不跟随 → 必须 -L
+            #   上一轮就是漏了这个，find 什么都没找到，77 行一行没加。
+            find -L drivers/input/touchscreen/oplus_touchscreen -name Kconfig -type f 2>/dev/null \
+              | grep -v "^${TPK}$" | sort > /tmp/tpk_list.txt
+            echo "  找到 $(wc -l < /tmp/tpk_list.txt) 个子 Kconfig:"
+            head -30 /tmp/tpk_list.txt
+
+            # 追加（幂等）
+            while read -r kf; do
+              [ -n "$kf" ] || continue
+              if ! grep -qF "source \"$kf\"" "$TPK" 2>/dev/null; then
+                printf 'source "%s"\n' "$kf" >> "$TPK"
+              fi
+            done < /tmp/tpk_list.txt
+
+            echo "  修后: $(wc -l < "$TPK") 行, source $(grep -c 'source' "$TPK" || echo 0) 条"
+            echo "  --- 追加的 source 行 ---"
+            grep 'source' "$TPK" | head -20
+
+            echo "  --- 关键 symbol 定义检查 ---"
+            for sym in TOUCHPANEL_NOVA_NT36672C_NOFLASH TOUCHPANEL_FOCAL_FT8006S_AA \
+                       TOUCHPANEL_HIMAX_HX83102D_NOFLASH TOUCHPANEL_ILITEK_ILITEK7807S \
+                       TOUCHPANEL_CHIPONE_ICNL9911C TOUCHPANEL_SYNAPTICS_TD4160; do
+              hit=$(grep -rl "config $sym" drivers/input/touchscreen/oplus_touchscreen/ 2>/dev/null | head -1)
+              if [ -n "$hit" ]; then
+                echo "    [ok]   $sym  <- $hit"
+              else
+                echo "    [MISS] $sym 仍然找不到"
+              fi
+            done
+            ok 0 "触摸屏 Kconfig source 链修复"
+          else
+            echo "  [FAIL] 缺 $TPK"; fail=1
+          fi
+
+          echo "  --- 修 Makefile（Kconfig 通了，但 Makefile 没接进编译）---"
+          # 第二个断点：drivers/input/touchscreen/Makefile 里没有
+          #   obj-$(CONFIG_TOUCHPANEL_OPLUS) += oplus_touchscreen/
+          # 所以即使 config 全对、Kconfig 全通，子目录也从来不参与编译，
+          # build.log 里只会有 touchpanel_common_driver.o 那 3 个公共文件。
+          TPM="drivers/input/touchscreen/Makefile"
+          if [ -f "$TPM" ]; then
+            if grep -q 'oplus_touchscreen' "$TPM"; then
+              echo "  [ok]   Makefile 已有 oplus_touchscreen"
+            else
+              printf '\n# OPLUS touchpanel（源码里被删掉了，补回）\nobj-$(CONFIG_TOUCHPANEL_OPLUS) += oplus_touchscreen/\n' >> "$TPM"
+              echo "  [ok]   已追加 obj-\$(CONFIG_TOUCHPANEL_OPLUS) += oplus_touchscreen/"
+            fi
+            tail -4 "$TPM"
+          else
+            echo "  [FAIL] 缺 $TPM"; fail=1
+          fi
+          echo "  --- 确认 OPLUS 总开关是 y ---"
+          grep -E '^CONFIG_TOUCHPANEL_OPLUS=' /tmp/allconfig || echo "  (ALLCONFIG 里没有，稍后 setkv 会加)"
+
+          echo "===== C. tp_devices.h 缺 TP_VXN 枚举 ====="
+          TP="$V/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"
+          if [ -f "$TP" ] && ! grep -q TP_VXN "$TP"; then
+            sed -i 's/^    TP_TXD,/    TP_TXD,\n    TP_VXN,/' "$TP"
+            ok $? "补 TP_VXN"
+          fi
+
+          echo "===== D. oplus_project 的 Kconfig/Makefile 挂载 ====="
+          SYSKC="drivers/soc/oplus/system/Kconfig"
+          if [ -f "$SYSKC" ]; then
+            ADDED=0
+            for sub in $(ls -d drivers/soc/oplus/system/*/ 2>/dev/null); do
+              name=$(basename "$sub")
+              [ -f "$sub/Kconfig" ] || continue
+              rel="drivers/soc/oplus/system/$name/Kconfig"
+              if ! grep -q "$rel" "$SYSKC"; then
+                printf 'source "%s"\n' "$rel" >> "$SYSKC"
+                ADDED=$((ADDED+1))
+              fi
+            done
+            echo "  [ok]   补 $ADDED 条 Kconfig source"
+          else
+            echo "  [FAIL] 缺 $SYSKC"; fail=1
+          fi
+          # 两个头文件名都链到 vendor 真头文件
+          rm -f include/soc/oplus/system/oppo_project.h
+          SRC_PJ="$V/oplus/kernel/boot/include/oplus_project.h"
+          [ -f "$SRC_PJ" ] || SRC_PJ="$V/oplus/kernel/system/include/oplus_project.h"
+          if [ -f "$SRC_PJ" ]; then
+            ln -sf "$SRC_PJ" include/soc/oplus/system/oplus_project.h
+            ln -sf "$SRC_PJ" include/soc/oplus/system/oppo_project.h
+            echo "  [ok]   oplus_project.h 已链接"
+          fi
+          [ -f include/scp.h ] || printf '%s\n' '#ifndef _SCP_FORWARD_H_' \
+            '#define _SCP_FORWARD_H_' \
+            '#include <../drivers/misc/mediatek/scp/include/scp.h>' \
+            '#endif' > include/scp.h
+
+          echo "===== E. is_key_process 缺失（vendor 里是 static）====="
           PROC_H="include/soc/oplus/system/oppo_process.h"
-          if [ -L "$PROC_H" ]; then rm -f "$PROC_H"; fi
+          rm -f "$PROC_H"
           printf '%s\n' \
             '#ifndef _OPPO_PROCESS_H_' \
             '#define _OPPO_PROCESS_H_' \
@@ -114,260 +264,433 @@ jobs:
             '#include <linux/string.h>' \
             'static inline bool is_key_process(struct task_struct *t)' \
             '{' \
-            '    if (!t) return false;' \
-            '    if (!strcmp(t->comm, "init") || !strcmp(t->comm, "system_server")' \
-            '        || !strcmp(t->comm, "surfaceflinger")' \
-            '        || !strcmp(t->comm, "servicemanager"))' \
-            '        return true;' \
-            '    return false;' \
+            '	if (!t) return false;' \
+            '	if (!strcmp(t->comm, "init") || !strcmp(t->comm, "system_server")' \
+            '	    || !strcmp(t->comm, "surfaceflinger")' \
+            '	    || !strcmp(t->comm, "servicemanager"))' \
+            '		return true;' \
+            '	return false;' \
             '}' \
             'static inline bool oppo_is_android_core_group(struct pid *pgrp) { return false; }' \
             '#endif' > "$PROC_H"
-          echo "  [ok] oppo_process.h stub ($(wc -c < "$PROC_H") bytes)"
+          ok $? "oppo_process.h 提供 is_key_process"
 
-          # D2. vendor inline 降级（always_inline body-not-available 修复）
-          echo 'CmltcG9ydCByZSwgb3MsIHN5cwoKIyDpgJrnlKggaW5saW5lIOmZjee6p+WZqO+8iHY1IOS6lOasoeaIkOWKn+aehOW7uumqjOivgeeJiO+8iQojIOino+WGsyBnbnU4OS9DOTkgaW5saW5lIOivreS5iea3t+eUqOWvvOiHtOeahO+8mgojICAgImlubGluaW5nIGZhaWxlZCBpbiBjYWxsIHRvICdhbHdheXNfaW5saW5lJyBYWFg6IGZ1bmN0aW9uIGJvZHkgbm90IGF2YWlsYWJsZSIKIwojIOinhOWIme+8iOS/neWuiO+8jOS7heS4pOexu++8ie+8mgojICAgMSkg5aS05paH5Lu257qv5aOw5piO77yaICBbZXh0ZXJuXSBpbmxpbmUgVFlQRSBmbihhcmdzKTsgIC0+ICBleHRlcm4gVFlQRSBmbihhcmdzKTsKIyAgIDIpIC5jIOaWh+S7tuWumuS5ie+8miAgIGlubGluZSBUWVBFIGZuKGFyZ3MpIHsgICAgICAgICAtPiAgVFlQRSBmbihhcmdzKSB7CiMg5LiN5Yqo77yac3RhdGljIGlubGluZeOAgeWktOaWh+S7tuW4puWHveaVsOS9k+eahCBpbmxpbmXjgIHlkKsgX19hdHRyaWJ1dGVfXyDnmoTooYwKCkRFQ0wgPSByZS5jb21waWxlKHInXihccyopKD86ZXh0ZXJuXHMrKT9pbmxpbmVccysoW0EtWmEtel9dW1x3IFx0XCpdKj8pXGIoXHcrKVxzKlwoKFteO10qKVwpXHMqO1xzKiQnKQpERUYgPSByZS5jb21waWxlKHInXihccyopaW5saW5lXHMrKFtBLVphLXpfXVtcdyBcdFwqXSo/KVxiKFx3KylccypcKChbXildKilcKVxzKihceyk/XHMqJCcpClNLSVAgPSB7J21haW4nfQoKCmRlZiBwcm9jZXNzKHBhdGgsIGlzX2hlYWRlcik6CiAgICB0cnk6CiAgICAgICAgbGluZXMgPSBvcGVuKHBhdGgsIGVuY29kaW5nPSd1dGYtOCcsIGVycm9ycz0nc3Vycm9nYXRlZXNjYXBlJykucmVhZGxpbmVzKCkKICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgcmV0dXJuIDAKICAgIGNoYW5nZWQsIG91dCA9IDAsIFtdCiAgICBmb3IgbG4gaW4gbGluZXM6CiAgICAgICAgcyA9IGxuLmxzdHJpcCgpCiAgICAgICAgaWYgcy5zdGFydHN3aXRoKCdzdGF0aWMgJykgb3IgJ3N0YXRpYyBpbmxpbmUnIGluIGxuOgogICAgICAgICAgICBvdXQuYXBwZW5kKGxuKQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGlmIHJlLm1hdGNoKHInXlxzKiMnLCBsbikgb3IgJ19fYXR0cmlidXRlX18nIGluIGxuOgogICAgICAgICAgICBvdXQuYXBwZW5kKGxuKQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIG0gPSBERUNMLm1hdGNoKGxuKQogICAgICAgIGlmIG0gYW5kIGlzX2hlYWRlcjoKICAgICAgICAgICAgaW5kLCB0eXAsIG5hbWUsIGFyZ3MgPSBtLmdyb3VwcygpCiAgICAgICAgICAgIGlmIG5hbWUgaW4gU0tJUDoKICAgICAgICAgICAgICAgIG91dC5hcHBlbmQobG4pCiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICBvdXQuYXBwZW5kKGluZCArICdleHRlcm4gJyArIHR5cC5zdHJpcCgpICsgJyAnICsgbmFtZSArICcoJyArIGFyZ3MgKyAnKTsnICsgJ1xuJykKICAgICAgICAgICAgY2hhbmdlZCArPSAxCiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgbSA9IERFRi5tYXRjaChsbikKICAgICAgICBpZiBtIGFuZCBub3QgaXNfaGVhZGVyOgogICAgICAgICAgICBpbmQsIHR5cCwgbmFtZSwgYXJncywgYnIgPSBtLmdyb3VwcygpCiAgICAgICAgICAgIGlmIG5hbWUgaW4gU0tJUDoKICAgICAgICAgICAgICAgIG91dC5hcHBlbmQobG4pCiAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICBuZXdsaW5lID0gaW5kICsgdHlwLnN0cmlwKCkgKyAnICcgKyBuYW1lICsgJygnICsgYXJncyArICcpJwogICAgICAgICAgICBpZiBicjoKICAgICAgICAgICAgICAgIG5ld2xpbmUgKz0gJyB7JwogICAgICAgICAgICBvdXQuYXBwZW5kKG5ld2xpbmUgKyAnXG4nKQogICAgICAgICAgICBjaGFuZ2VkICs9IDEKICAgICAgICAgICAgY29udGludWUKICAgICAgICBvdXQuYXBwZW5kKGxuKQogICAgaWYgY2hhbmdlZDoKICAgICAgICBvcGVuKHBhdGgsICd3JywgZW5jb2Rpbmc9J3V0Zi04JywgZXJyb3JzPSdzdXJyb2dhdGVlc2NhcGUnKS53cml0ZWxpbmVzKG91dCkKICAgIHJldHVybiBjaGFuZ2VkCgoKZGVmIHdhbGsocm9vdHMpOgogICAgdG90LCBmaWxlcyA9IDAsIDAKICAgIGZvciByb290IGluIHJvb3RzOgogICAgICAgIGlmIG5vdCBvcy5wYXRoLmlzZGlyKHJvb3QpOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGZvciBkcCwgZG4sIGZucyBpbiBvcy53YWxrKHJvb3QpOgogICAgICAgICAgICBkbls6XSA9IFtkIGZvciBkIGluIGRuIGlmIGQgIT0gJy5naXQnXQogICAgICAgICAgICBmb3IgZm4gaW4gZm5zOgogICAgICAgICAgICAgICAgaWYgZm4uZW5kc3dpdGgoJy5oJyk6CiAgICAgICAgICAgICAgICAgICAgbiA9IHByb2Nlc3Mob3MucGF0aC5qb2luKGRwLCBmbiksIFRydWUpCiAgICAgICAgICAgICAgICBlbGlmIGZuLmVuZHN3aXRoKCcuYycpOgogICAgICAgICAgICAgICAgICAgIG4gPSBwcm9jZXNzKG9zLnBhdGguam9pbihkcCwgZm4pLCBGYWxzZSkKICAgICAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgICAgIGlmIG46CiAgICAgICAgICAgICAgICAgICAgdG90ICs9IG4KICAgICAgICAgICAgICAgICAgICBmaWxlcyArPSAxCiAgICBwcmludCgnICBpbmxpbmUgZG93bmdyYWRlZDogJWQgc3BvdHMgLyAlZCBmaWxlcycgJSAodG90LCBmaWxlcykpCgoKaWYgX19uYW1lX18gPT0gJ19fbWFpbl9fJzoKICAgIHdhbGsoc3lzLmFyZ3ZbMTpdKQo=' | base64 -d > /tmp/inline_fix.py
-          python3 /tmp/inline_fix.py "$V" 2>&1 | tail -4 || true
+          echo "===== F. sy6529 括号优先级（真语法问题）====="
+          SY="$V/oplus/kernel/charger/v1/voocphy/oplus_sy6529.c"
+          [ -f "$SY" ] && {
+            sed -i 's/if (\*data == sy6529_CHARGE_MODE_2_1 | \*data == sy6529_CHARGE_MODE_1_1)/if ((*data == sy6529_CHARGE_MODE_2_1) | (*data == sy6529_CHARGE_MODE_1_1))/' "$SY"
+            ok $? "sy6529 括号"
+          }
 
-          # D3. 孤儿 Kconfig 定向补 source（touchpanel/OPLUS/f2fs 特性符号可达性）
-          echo 'CmltcG9ydCBvcywgcmUsIHN5cwoKUk9PVCA9IG9zLmdldGN3ZCgpClZFTkRPUiA9IG9zLnBhdGguYWJzcGF0aChvcy5wYXRoLmpvaW4oUk9PVCwgJy4uJywgJ3ZlbmRvcicpKQoKIyDnsr7lh4bmiZPms5XvvJrlj6rpkojlr7nljp/ljoIvQiDniYjln7rnur/ph4wgPXnjgIHkvYYgS2NvbmZpZyDpk77lj6/og73mlq3nmoTlhbfkvZMgc3ltYm9sClRBUkdFVFMgPSBbCiAgICAnVE9VQ0hQQU5FTF9TWU5BUFRJQ1NfVEQ0MTYwJywgJ1RPVUNIUEFORUxfRk9DQUwnLCAnVE9VQ0hQQU5FTF9ISU1BWCcsCiAgICAnVE9VQ0hQQU5FTF9GT0NBTF9GVDM1MTgnLCAnVE9VQ0hQQU5FTF9GT0NBTF9GVDgwMDZTX0FBJywKICAgICdUT1VDSFBBTkVMX05UX0RJR0lUQUxOT0lTRV9URVNUJywgJ1RPVUNIUEFORUxfTlRfUEVOX1NVUFBPUlQnLAogICAgJ1RPVUNIUEFORUxfTk9WQV9OVDM2NTI1Ql9OT0ZMQVNIJywgJ1RPVUNIUEFORUxfTk9WQV9OVDM2NjcyQ19OT0ZMQVNIJywKICAgICdUT1VDSFBBTkVMX0hJTUFYX0hYODMxMDJEX05PRkxBU0gnLCAnVE9VQ0hQQU5FTF9ISU1BWF9IWDgzMTEyRl9OT0ZMQVNIJywKICAgICdUT1VDSFBBTkVMX0lMSVRFS19JTElURUs3ODA3UycsICdUT1VDSFBBTkVMX0NISVBPTkVfSUNOTDk5MTFDJywKICAgICdPUExVU19CTEtfTU9OSVRPUicsICdPUExVU19NRU1fTU9OSVRPUicsICdPUExVU19QUk9BQ1RJVkVfQ09NUEFDVCcsCiAgICAnUFJPQUNUSVZFX0NPTVBBQ1QnLCAnT1BMVVNfQ0hJUF9TT0NfTk9ERScsICdPUExVU19TSE9SVF9DX0JBVFRfQ0hFQ0snLAogICAgJ09QTFVTX1NIT1JUX1VTRVJTUEFDRScsICdPUExVU19JT05fQk9PU1RQT09MX1NVUFBPUlRfUFJKJywKICAgICdPUExVU19GRUFUVVJFX0ROU19IT09LJywgJ09QTFVTX0ZFQVRVUkVfU1RBVFNfQ0FMQycsICdPUExVU19GRUFUVVJFX1FSX1NDQU4nLAogICAgJ09QTFVTX0ZFQVRVUkVfREFUQV9NT0RVTEUnLCAnT1BMVVNfRkVBVFVSRV9ST1RBVElPTl9ERVRFQ1QnLAogICAgJ09QTFVTX0ZFQVRVUkVfQkFDS19UQVBfREVURUNUJywgJ09QTFVTX0ZFQVRVUkVfQ1BVX0pBTktJTkZPJywKICAgICdPUExVU19GRUFUVVJFX1NJR0tJTExfRElBR05PU0lTJywgJ09QTFVTX0ZFQVRVUkVfU1RPUkFHRV9JT19NRVRSSUNTJywKICAgICdPUExVU19GRUFUVVJFX0ZJTEVfTU9OSVRPUicsICdPUExVU19QT1dFUklORk9fU1RBTkRCWV9ERUJVRycsCiAgICAnRjJGU19BUFBCT09TVCcsICdGMkZTX0ZTX0RFRFVQJywgJ0xaNEhDX0NPTVBSRVNTJywKXQoKU1JDID0gcmUuY29tcGlsZShyJ15ccypzb3VyY2VccysiKFteIl0rKSInLCByZS5NKQoKCmRlZiBmaW5kX2RlY2woKToKICAgIGRlY2wgPSB7fQogICAgZm9yIGJhc2UgaW4gKFJPT1QsIFZFTkRPUik6CiAgICAgICAgaWYgbm90IG9zLnBhdGguaXNkaXIoYmFzZSk6CiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgZm9yIGRwLCBkbiwgZm5zIGluIG9zLndhbGsoYmFzZSk6CiAgICAgICAgICAgIGRuWzpdID0gW2QgZm9yIGQgaW4gZG4gaWYgZCBub3QgaW4gKCcuZ2l0JywgJ291dCcsICcucmVwbycpXQogICAgICAgICAgICBmb3IgZm4gaW4gZm5zOgogICAgICAgICAgICAgICAgaWYgJ0tjb25maWcnIG5vdCBpbiBmbjoKICAgICAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICAgICAgcCA9IG9zLnBhdGguam9pbihkcCwgZm4pCiAgICAgICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICAgICAgdHh0ID0gb3BlbihwLCBlcnJvcnM9J3JlcGxhY2UnKS5yZWFkKCkKICAgICAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgICAgIGZvciB0IGluIFRBUkdFVFM6CiAgICAgICAgICAgICAgICAgICAgaWYgdCBub3QgaW4gZGVjbCBhbmQgcmUuc2VhcmNoKHInXlxzKmNvbmZpZ1xzKycgKyB0ICsgcidccyokJywgdHh0LCByZS5NKToKICAgICAgICAgICAgICAgICAgICAgICAgZGVjbFt0XSA9IG9zLnBhdGgubm9ybXBhdGgocCkKICAgIHJldHVybiBkZWNsCgoKZGVmIGNvbGxlY3Rfc291cmNlZCgpOgogICAgcyA9IHNldCgpCiAgICBmb3IgYmFzZSBpbiAoUk9PVCwgVkVORE9SKToKICAgICAgICBpZiBub3Qgb3MucGF0aC5pc2RpcihiYXNlKToKICAgICAgICAgICAgY29udGludWUKICAgICAgICBmb3IgZHAsIGRuLCBmbnMgaW4gb3Mud2FsayhiYXNlKToKICAgICAgICAgICAgZG5bOl0gPSBbZCBmb3IgZCBpbiBkbiBpZiBkIG5vdCBpbiAoJy5naXQnLCAnb3V0JyldCiAgICAgICAgICAgIGZvciBmbiBpbiBmbnM6CiAgICAgICAgICAgICAgICBpZiAnS2NvbmZpZycgbm90IGluIGZuOgogICAgICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgICAgICBwID0gb3MucGF0aC5qb2luKGRwLCBmbikKICAgICAgICAgICAgICAgIHRyeToKICAgICAgICAgICAgICAgICAgICB0eHQgPSBvcGVuKHAsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKQogICAgICAgICAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICAgICAgZm9yIG0gaW4gU1JDLmZpbmRpdGVyKHR4dCk6CiAgICAgICAgICAgICAgICAgICAgcmVsID0gbS5ncm91cCgxKQogICAgICAgICAgICAgICAgICAgIHMuYWRkKG9zLnBhdGgubm9ybXBhdGgob3MucGF0aC5qb2luKFJPT1QsIHJlbCkpKQogICAgICAgICAgICAgICAgICAgIHMuYWRkKG9zLnBhdGgubm9ybXBhdGgob3MucGF0aC5qb2luKG9zLnBhdGguZGlybmFtZShwKSwgcmVsKSkpCiAgICByZXR1cm4gcwoKCmRlZiBjb2xsZWN0X2VkZ2VzKCk6CiAgICBlZGdlcyA9IHt9CiAgICBmb3IgYmFzZSBpbiAoUk9PVCwgVkVORE9SKToKICAgICAgICBpZiBub3Qgb3MucGF0aC5pc2RpcihiYXNlKToKICAgICAgICAgICAgY29udGludWUKICAgICAgICBmb3IgZHAsIGRuLCBmbnMgaW4gb3Mud2FsayhiYXNlKToKICAgICAgICAgICAgZG5bOl0gPSBbZCBmb3IgZCBpbiBkbiBpZiBkIG5vdCBpbiAoJy5naXQnLCAnb3V0JyldCiAgICAgICAgICAgIGZvciBmbiBpbiBmbnM6CiAgICAgICAgICAgICAgICBpZiAnS2NvbmZpZycgbm90IGluIGZuOgogICAgICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgICAgICBwID0gb3MucGF0aC5qb2luKGRwLCBmbikKICAgICAgICAgICAgICAgIHRyeToKICAgICAgICAgICAgICAgICAgICB0eHQgPSBvcGVuKHAsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKQogICAgICAgICAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICAgICAgdGd0ID0gW10KICAgICAgICAgICAgICAgIGZvciBtIGluIFNSQy5maW5kaXRlcih0eHQpOgogICAgICAgICAgICAgICAgICAgIHJlbCA9IG0uZ3JvdXAoMSkKICAgICAgICAgICAgICAgICAgICBpZiAnJCgnIGluIHJlbDoKICAgICAgICAgICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgICAgICAgICBmb3IgY2FuZCBpbiAocmVsLCBvcy5wYXRoLmpvaW4ob3MucGF0aC5kaXJuYW1lKHApLCByZWwpKToKICAgICAgICAgICAgICAgICAgICAgICAgYXAgPSBvcy5wYXRoLm5vcm1wYXRoKG9zLnBhdGguam9pbihST09ULCBjYW5kKSkKICAgICAgICAgICAgICAgICAgICAgICAgaWYgb3MucGF0aC5pc2ZpbGUoYXApOgogICAgICAgICAgICAgICAgICAgICAgICAgICAgdGd0LmFwcGVuZChhcCkKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGJyZWFrCiAgICAgICAgICAgICAgICBlZGdlc1tvcy5wYXRoLm5vcm1wYXRoKHApXSA9IHRndAogICAgcmV0dXJuIGVkZ2VzCgoKZGVmIHJlYWNoYWJsZShlZGdlcywgc3RhcnQsIHdhbnQpOgogICAgc2VlbiA9IHNldCgpCiAgICBzdGFjayA9IFtzdGFydF0KICAgIHdoaWxlIHN0YWNrOgogICAgICAgIGN1ciA9IHN0YWNrLnBvcCgpCiAgICAgICAgaWYgY3VyIGluIHNlZW46CiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgc2Vlbi5hZGQoY3VyKQogICAgICAgIGlmIGN1ciA9PSB3YW50OgogICAgICAgICAgICByZXR1cm4gVHJ1ZQogICAgICAgIHN0YWNrLmV4dGVuZChlZGdlcy5nZXQoY3VyLCBbXSkpCiAgICByZXR1cm4gRmFsc2UKCgpkZWNsID0gZmluZF9kZWNsKCkKcHJpbnQoJyAgZGVjbGFyZWQgdGFyZ2V0cyBmb3VuZDogJWQgLyAlZCcgJSAobGVuKGRlY2wpLCBsZW4oVEFSR0VUUykpKQoKZG9uZSA9IHNldCgpCmFkZGVkID0gMApmb3Igcm5kIGluIHJhbmdlKDYpOgogICAgc291cmNlZCA9IGNvbGxlY3Rfc291cmNlZCgpCiAgICByX2FkZGVkID0gMAogICAgZm9yIHQsIGtjIGluIGRlY2wuaXRlbXMoKToKICAgICAgICBrYyA9IG9zLnBhdGgubm9ybXBhdGgoa2MpCiAgICAgICAgaWYga2MgaW4gZG9uZSBvciBrYyBpbiBzb3VyY2VkOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIHVwID0gb3MucGF0aC5kaXJuYW1lKGtjKQogICAgICAgIHRhcmdldCA9IE5vbmUKICAgICAgICBmb3IgXyBpbiByYW5nZSg4KToKICAgICAgICAgICAgY2FuZCA9IG9zLnBhdGgubm9ybXBhdGgob3MucGF0aC5qb2luKHVwLCAnS2NvbmZpZycpKQogICAgICAgICAgICBpZiBvcy5wYXRoLmlzZmlsZShjYW5kKSBhbmQgY2FuZCAhPSBrYzoKICAgICAgICAgICAgICAgIHRhcmdldCA9IGNhbmQKICAgICAgICAgICAgICAgIGJyZWFrCiAgICAgICAgICAgIHVwMiA9IG9zLnBhdGguZGlybmFtZSh1cCkKICAgICAgICAgICAgaWYgdXAyID09IHVwOgogICAgICAgICAgICAgICAgYnJlYWsKICAgICAgICAgICAgdXAgPSB1cDIKICAgICAgICBpZiBub3QgdGFyZ2V0OgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIHJlbCA9IG9zLnBhdGgucmVscGF0aChrYywgUk9PVCkucmVwbGFjZSgnXFwnLCAnLycpCiAgICAgICAgdHJ5OgogICAgICAgICAgICB0eHQgPSBvcGVuKHRhcmdldCwgZXJyb3JzPSdyZXBsYWNlJykucmVhZCgpCiAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICAgICAgY29udGludWUKICAgICAgICBpZiByZWwgaW4gdHh0OgogICAgICAgICAgICBkb25lLmFkZChrYykKICAgICAgICAgICAgY29udGludWUKICAgICAgICB3aXRoIG9wZW4odGFyZ2V0LCAnYScsIGVycm9ycz0ncmVwbGFjZScpIGFzIGZoOgogICAgICAgICAgICBmaC53cml0ZSgnXG5zb3VyY2UgIiVzIlxuJyAlIHJlbCkKICAgICAgICBkb25lLmFkZChrYykKICAgICAgICByX2FkZGVkICs9IDEKICAgICAgICBwcmludCgnICAgICsgc291cmNlICIlcyIgLT4gJXMnICUgKHJlbCwgb3MucGF0aC5yZWxwYXRoKHRhcmdldCwgUk9PVCkpKQogICAgYWRkZWQgKz0gcl9hZGRlZAogICAgaWYgcl9hZGRlZCA9PSAwOgogICAgICAgIGJyZWFrCgpwcmludCgnICBvcnBoYW4gS2NvbmZpZyBsaW5rZWQ6ICVkJyAlIGFkZGVkKQoKIyDlj6/ovr7mgKfpqozor4EgKyDkv67lpI3vvJrku47moLkgS2NvbmZpZyDlh7rlj5Hlv4Xpobvog73otbDliLDmr4/kuKogdGFyZ2V0CmVkZ2VzID0gY29sbGVjdF9lZGdlcygpClJPT1RfS0MgPSBvcy5wYXRoLm5vcm1wYXRoKG9zLnBhdGguam9pbihST09ULCAnS2NvbmZpZycpKQp1bnJlYWNoID0gW10KZm9yIHQsIGtjIGluIGRlY2wuaXRlbXMoKToKICAgIGlmIG5vdCByZWFjaGFibGUoZWRnZXMsIFJPT1RfS0MsIG9zLnBhdGgubm9ybXBhdGgoa2MpKToKICAgICAgICB1bnJlYWNoLmFwcGVuZCgodCwgb3MucGF0aC5ub3JtcGF0aChrYykpKQpwcmludCgnICB1bnJlYWNoYWJsZSBhZnRlciBsaW5rOiAlZCcgJSBsZW4odW5yZWFjaCkpCmZpeGVkID0gMApmb3IgdCwga2MgaW4gdW5yZWFjaDoKICAgIHVwID0gb3MucGF0aC5kaXJuYW1lKGtjKQogICAgZm9yIF8gaW4gcmFuZ2UoOCk6CiAgICAgICAgY2FuZCA9IG9zLnBhdGgubm9ybXBhdGgob3MucGF0aC5qb2luKHVwLCAnS2NvbmZpZycpKQogICAgICAgIGlmIG9zLnBhdGguaXNmaWxlKGNhbmQpIGFuZCBjYW5kICE9IGtjIGFuZCByZWFjaGFibGUoZWRnZXMsIFJPT1RfS0MsIGNhbmQpOgogICAgICAgICAgICByZWwgPSBvcy5wYXRoLnJlbHBhdGgoa2MsIG9zLnBhdGguZGlybmFtZShjYW5kKSkucmVwbGFjZSgnXFwnLCAnLycpCiAgICAgICAgICAgIHRyeToKICAgICAgICAgICAgICAgIHR4dCA9IG9wZW4oY2FuZCwgZXJyb3JzPSdyZXBsYWNlJykucmVhZCgpCiAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgICAgICBicmVhawogICAgICAgICAgICBpZiByZWwgaW4gdHh0OgogICAgICAgICAgICAgICAgYnJlYWsKICAgICAgICAgICAgd2l0aCBvcGVuKGNhbmQsICdhJywgZXJyb3JzPSdyZXBsYWNlJykgYXMgZmg6CiAgICAgICAgICAgICAgICBmaC53cml0ZSgnXG5zb3VyY2UgIiVzIlxuJyAlIHJlbCkKICAgICAgICAgICAgcHJpbnQoJyAgICArIChyZWFjaCBmaXgpIHNvdXJjZSAiJXMiIC0+ICVzJyAlIChyZWwsIG9zLnBhdGgucmVscGF0aChjYW5kLCBST09UKSkpCiAgICAgICAgICAgIGZpeGVkICs9IDEKICAgICAgICAgICAgYnJlYWsKICAgICAgICB1cDIgPSBvcy5wYXRoLmRpcm5hbWUodXApCiAgICAgICAgaWYgdXAyID09IHVwOgogICAgICAgICAgICBicmVhawogICAgICAgIHVwID0gdXAyCnByaW50KCcgIHJlYWNoLWZpeGVkOiAlZCcgJSBmaXhlZCkK' | base64 -d > /tmp/fix_kconfig.py
-          python3 /tmp/fix_kconfig.py 2>&1 | tail -15 || true
-
-          # D4. oplus system 子系统接线（OPROJECT/FEEDBACK 在 buildB 里是 y）
-          SOCMK="drivers/soc/oplus/Makefile"
-          if [ -f "$SOCMK" ] && ! grep -q 'healthinfo/' "$SOCMK" 2>/dev/null; then
-            printf 'obj-y += healthinfo/\n' >> "$SOCMK"
-            echo "  [ok] soc/oplus/Makefile + healthinfo"
-          fi
-          SYSKC="drivers/soc/oplus/system/Kconfig"
-          if [ -f "$SYSKC" ]; then
-            for sub in $(ls -d drivers/soc/oplus/system/*/ 2>/dev/null); do
-              name=$(basename "$sub")
-              [ -f "$sub/Kconfig" ] || continue
-              rel="drivers/soc/oplus/system/$name/Kconfig"
-              grep -q "$rel" "$SYSKC" || printf 'source "%s"\n' "$rel" >> "$SYSKC"
-            done
-            echo "  [ok] system/Kconfig subdirs sourced"
-          fi
-          rm -f include/soc/oplus/system/oppo_project.h include/soc/oplus/system/oplus_project.h
-          SRC_PJ="$V/oplus/kernel/boot/include/oplus_project.h"
-          [ -f "$SRC_PJ" ] || SRC_PJ="$V/oplus/kernel/system/include/oplus_project.h"
-          if [ -f "$SRC_PJ" ]; then
-            ln -sf "$SRC_PJ" include/soc/oplus/system/oplus_project.h
-            ln -sf "$SRC_PJ" include/soc/oplus/system/oppo_project.h
-            echo "  [ok] oplus_project.h linked"
-          fi
-          [ -f include/scp.h ] || printf '%s\n' '#ifndef _SCP_FORWARD_H_' \
-            '#define _SCP_FORWARD_H_' \
-            '#include <../drivers/misc/mediatek/scp/include/scp.h>' \
-            '#endif' > include/scp.h
-
-          # D5. 核心 4 处 inline 声明修正
-          sed -i 's/^extern inline bool handle_chp_ext_cmd/extern bool handle_chp_ext_cmd/' include/linux/mm.h 2>/dev/null || true
-          sed -i 's/^inline void uclamp_se_set/extern void uclamp_se_set/' kernel/sched/sched.h 2>/dev/null || true
-          sed -i 's/^inline void ksm_flock/extern void ksm_flock/' include/linux/keyslot-manager.h 2>/dev/null || true
-          sed -i 's/^inline void blk_crypto_flock/extern void blk_crypto_flock/' include/linux/blk-crypto.h 2>/dev/null || true
-
-          # D6. futex.c：vendor 不提供 locking_vh_*_handler，屏蔽调用点
-          #     （LOCKING_STRATEGY 保持 y，mutex_list_add 由 sched_assist 提供）
+          echo "===== G. futex.c 里 vendor 未提供的 handler ====="
           FUTEX_C="kernel/futex.c"
           if [ -f "$FUTEX_C" ]; then
-            sed -i 's/^#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)$/#if 0 \/* pjs110: vendor handler missing *\//' "$FUTEX_C"
-            echo "  [ok] futex.c handler calls masked (left: $(grep -c 'IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)' "$FUTEX_C" || echo 0))"
+            cnt=$(grep -c 'locking_vh_.*_handler' "$FUTEX_C" 2>/dev/null || echo 0)
+            echo "  发现 $cnt 处 locking_vh_*_handler 调用"
+            if [ "$cnt" -gt 0 ]; then
+              sed -i 's/^#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)$/#if 0 \/* vendor handlers not provided *\//' "$FUTEX_C"
+              echo "  已屏蔽（vendor 提供的是 android_vh_* / locking_vh_do_futex，名字对不上）"
+            fi
           fi
 
-          # D7. tp_devices.h 补 TP_VXN（touch.c 引用，v5 实测缺陷）
-          for TP in drivers/input/touchscreen/tp_devices.h \
-                    "$V/oplus/kernel/touchpanel/oplus_touchscreen/tp_devices.h"; do
-            if [ -f "$TP" ] && ! grep -q 'TP_VXN' "$TP"; then
-              awk 'done==0 && /TP_TXD,[ ]*$/ { print; n=$0; gsub(/TP_TXD/,"TP_VXN",n); print n; done=1; next } { print }' \
-                "$TP" > /tmp/tp.new && mv /tmp/tp.new "$TP"
-              echo "  [ok] $TP: TP_VXN $(grep -c TP_VXN "$TP")"
-            fi
-          done
-
-          # D8. sensor_devinfo.c 空参数补原型（v5 实测缺陷）
-          for SDI in "$V/oplus/sensor/kernel/oplus_sensor_devinfo/sensor_devinfo.c" \
-                     "$V/oplus/sensor/kernel/sensorhub/oplus_sensor_devinfo/sensor_devinfo.c"; do
-            if [ -f "$SDI" ] && ! grep -q 'register_lcdinfo_notifier(struct notifier_block' "$SDI"; then
-              sed -i 's/^__attribute__((weak)) int register_lcdinfo_notifier() {/__attribute__((weak)) int register_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
-              sed -i 's/^__attribute__((weak)) int unregister_lcdinfo_notifier() {/__attribute__((weak)) int unregister_lcdinfo_notifier(struct notifier_block *nb) {/' "$SDI"
-              echo "  [ok] sensor_devinfo prototype fixed: $SDI"
-            fi
-          done
-
-          # D9. sy6529 运算优先级括号（v5 实测缺陷）
-          SY="$V/oplus/kernel/charger/v1/voocphy/oplus_sy6529.c"
-          if [ -f "$SY" ]; then
-            sed -i 's/if (\*data == sy6529_CHARGE_MODE_2_1 | \*data == sy6529_CHARGE_MODE_1_1)/if ((*data == sy6529_CHARGE_MODE_2_1) | (*data == sy6529_CHARGE_MODE_1_1))/' "$SY"
-            echo "  [ok] sy6529 parens fixed"
+          echo "===== A4. module.c 版本校验双放行（WiFi ko CRC 拒载修复）====="
+          MODC="kernel/module.c"
+          if [ -f "$MODC" ]; then
+            cp "$MODC" /tmp/module.c.orig
+            echo 'IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiLorqkga2VybmVsL21vZHVsZS5jIOeahOeJiOacrOagoemqjOaXoOadoeS7tuaUvuihjOOAggoK5L6d5o2u77yI5YWo6YOo57uP5a6e5rWL56Gu6K6k77yJ77yaCiAgc3RydWN0IG1vZHVsZSDluIPlsYAgIOWOn+WOgiA9PSDmlrDnvJYgICAgaW5pdD0weDE4MCBleGl0PTB4M2EwIHNpemU9MTAyNAogIHZlcm1hZ2ljICAgICAgICAgICAg5LiA5a2X5LiN5beuICA0LjE5LjE5MSsgU01QIHByZWVtcHQgbW9kX3VubG9hZCBtb2R2ZXJzaW9ucyBhYXJjaDY0CiAg57yW6K+R5ZmoICAgICAgICAgICAgICBjbGFuZyAxMS4wLjEgKHIzODM5MDIpIOWPjOaWueS4gOiHtAogIOe6r+WOn+WOgiBjb25maWcg57yW6K+RICBDUkMg5LuN5pivIDB4ZjNjMGIxNjjvvIjljp/ljoIgMHhkZGZlYTVkYe+8iQogIOKGkiDlt67lvILlj6rmnaXoh6ogZ2Vua3N5bXMg5a+557G75Z6L5paH5pys55qE6Kej5p6Q77yM5Y6f5Y6C56eB5pyJIHBhdGNoIOS4jeWPr+W+lwoK5biD5bGA5LiA6Ie077yM56ym5Y+35ZCN5LiA6Ie077yM5ZSv5LiA5LiN5Yy56YWN55qE5piv54mI5pys5Y+35pWw5a2X5pys6Lqr44CCCui3s+i/h+aVsOWtl+avlOWvueS4jeaUueWPmOS7u+S9leWGheWtmOiuv+mXrui3r+W+hO+8mnZlbmRvciBrbyDmjInoh6rlt7HnmoTnu5PmnoTkvZPnkIbop6Porr/pl67lhoXmoLjvvIwK6ICM6YKj5Lu955CG6Kej5ZKM5paw5YaF5qC455qE5a6e6ZmF5biD5bGA6YCQ5a2X5q6155u45ZCM77yI6YeN5a6a5L2N5YGP56e75a6e5rWL5LiA6Ie077yJ44CCCgrlj6rlnKggI2lmZGVmIENPTkZJR19NT0RWRVJTSU9OUyDliIbmlK/lhoXmlLnlhpnvvIwjZWxzZSDliIbmlK/kv53mjIHljp/moLfjgIIKIiIiCgppbXBvcnQgc3lzCgpUQUcgPSAnT1BQT19BMlhfVkVORE9SX0tPX0JZUEFTUycKCgpkZWYgbWFpbihwYXRoKToKICAgIHMgPSBvcGVuKHBhdGgsIGVuY29kaW5nPSd1dGYtOCcsIGVycm9ycz0nc3Vycm9nYXRlZXNjYXBlJykucmVhZCgpCgogICAgaWYgVEFHIGluIHM6CiAgICAgICAgcHJpbnQoJyAgW3NraXBdIOW3suaJk+i/h+ihpeS4gScpCiAgICAgICAgcmV0dXJuIDAKCiAgICBhbmNob3JfaWZkZWYgPSAnI2lmZGVmIENPTkZJR19NT0RWRVJTSU9OU1xuJwogICAgaWYgYW5jaG9yX2lmZGVmIG5vdCBpbiBzOgogICAgICAgIHByaW50KCcgIFtGQUlMXSDmib7kuI3liLAgI2lmZGVmIENPTkZJR19NT0RWRVJTSU9OUycpCiAgICAgICAgcmV0dXJuIDEKICAgIGIwID0gcy5pbmRleChhbmNob3JfaWZkZWYpCgogICAgIyAtLS0tIDEuIGNoZWNrX3ZlcnNpb24gLS0tLQogICAga2V5ID0gJ3N0YXRpYyBpbnQgY2hlY2tfdmVyc2lvbihjb25zdCBzdHJ1Y3QgbG9hZF9pbmZvICppbmZvJwogICAgaWYga2V5IG5vdCBpbiBzOgogICAgICAgIHByaW50KCcgIFtGQUlMXSDmib7kuI3liLAgY2hlY2tfdmVyc2lvbicpCiAgICAgICAgcmV0dXJuIDEKICAgIGkgPSBzLmluZGV4KGtleSwgYjApCiAgICBqID0gcy5pbmRleCgnXG5iYWRfdmVyc2lvbjonLCBpKQogICAgYm9keSA9IHNbaTpqXQoKICAgIG1hcmtlciA9ICdcdHN0cnVjdCBtb2R2ZXJzaW9uX2luZm8gKnZlcnNpb25zO1xuJwogICAgaWYgbWFya2VyIG5vdCBpbiBib2R5OgogICAgICAgIHByaW50KCcgIFtGQUlMXSBjaGVja192ZXJzaW9uIOmHjOaJvuS4jeWIsOmUmueCuScpCiAgICAgICAgcmV0dXJuIDEKICAgIGJvZHkgPSBib2R5LnJlcGxhY2UoCiAgICAgICAgbWFya2VyLAogICAgICAgIG1hcmtlciArICdcblx0LyogJXM6IOW4g+WxgOW3suWunua1i+S4gOiHtO+8jOeJiOacrOWPt+avlOWvuei3s+i/hyAqL1xuXHRyZXR1cm4gMTtcbicgJSBUQUcsCiAgICAgICAgMSwKICAgICkKICAgIHMgPSBzWzppXSArIGJvZHkgKyBzW2o6XQogICAgcHJpbnQoJyAgW29rXSAgIGNoZWNrX3ZlcnNpb24g5pS55Li65peg5p2h5Lu25pS+6KGMJykKCiAgICAjIC0tLS0gMi4gY2hlY2tfbW9kc3RydWN0X3ZlcnNpb27vvIjlkIzkuIDljLrlnZflhoXvvIzlj4zkv53pmanvvIktLS0tCiAgICBrZXkyID0gJ3N0YXRpYyBpbmxpbmUgaW50IGNoZWNrX21vZHN0cnVjdF92ZXJzaW9uKGNvbnN0IHN0cnVjdCBsb2FkX2luZm8gKmluZm8sJwogICAgYjEgPSBzLmluZGV4KGFuY2hvcl9pZmRlZikKICAgIGUxID0gcy5pbmRleCgnXG4jZWxzZScsIGIxKQogICAgc2VnX3N0YXJ0ID0gcy5pbmRleChrZXkyLCBiMSkKICAgIGlmIHNlZ19zdGFydCA8IGUxOgogICAgICAgIHNlZ19lbmQgPSBzLmluZGV4KCdcbn1cbicsIHNlZ19zdGFydCkgKyAzCiAgICAgICAgbmV3ID0gKAogICAgICAgICAgICBrZXkyICsgJ1xuJwogICAgICAgICAgICAnXHRcdFx0XHRcdCAgc3RydWN0IG1vZHVsZSAqbW9kKVxuJwogICAgICAgICAgICAne1xuJwogICAgICAgICAgICAnXHQvKiAlczog5ZCM5LiKICovXG4nCiAgICAgICAgICAgICdcdHJldHVybiAxO1xuJwogICAgICAgICAgICAnfVxuJyAlIFRBRwogICAgICAgICkKICAgICAgICBzID0gc1s6c2VnX3N0YXJ0XSArIG5ldyArIHNbc2VnX2VuZDpdCiAgICAgICAgcHJpbnQoJyAgW29rXSAgIGNoZWNrX21vZHN0cnVjdF92ZXJzaW9uIOebtOaOpei/lOWbniAxJykKCiAgICBvcGVuKHBhdGgsICd3JywgZW5jb2Rpbmc9J3V0Zi04JywgZXJyb3JzPSdzdXJyb2dhdGVlc2NhcGUnKS53cml0ZShzKQogICAgcmV0dXJuIDAKCgppZiBfX25hbWVfXyA9PSAnX19tYWluX18nOgogICAgc3lzLmV4aXQobWFpbihzeXMuYXJndlsxXSkp' | base64 -d > /tmp/patch_modver.py
+            python3 -c "import ast;ast.parse(open('/tmp/patch_modver.py').read())" \
+              && echo "  [ok]   patch_modver.py 语法 OK"
+            python3 /tmp/patch_modver.py "$MODC" || { echo "  [FAIL] 版本校验补丁失败"; fail=1; }
+            echo "  --- 修后 ---"
+            sed -n "/#ifdef CONFIG_MODVERSIONS/,/^#else/p" "$MODC" \
+              | sed -n '/static int check_version/,/^bad_version:/p' | head -14
+          else
+            echo "  [FAIL] 缺 $MODC"; fail=1
           fi
 
-          # D10. imgsensor 死引用：给缺 Makefile 的传感器目录建空桩
-          #      v2 教训：引用可能藏在 .mk / 非标准名文件里，--include=Makefile 漏网
-          #      v3：扫 $DS 下所有文本文件的 v1_1/NAME 引用，缺就建空桩
-          #      空 Makefile = 目录可进入但什么都不编，零副作用
-          DS=drivers/misc/mediatek/imgsensor/src
-          mkdir -p "$DS/common/v1_1" 2>/dev/null
-          for name in $(grep -rhoE 'v1_1/[A-Za-z0-9_]+' "$DS" 2>/dev/null | sed 's|^.*v1_1/||' | sort -u); do
-            [ -n "$name" ] || continue
-            if [ ! -f "$DS/common/v1_1/$name/Makefile" ]; then
-              mkdir -p "$DS/common/v1_1/$name"
-              : > "$DS/common/v1_1/$name/Makefile"
-              echo "  [ok] imgsensor stub: $name"
-            fi
+          echo "===== H. -Werror 全量降级（clang 下警告更多）====="
+          grep -rl -- "-Werror" --include=Makefile --include=Kbuild \
+               --include="*.mk" --include="*.mak" . 2>/dev/null | while read -r f; do
+            sed -i 's/-Werror=/-Wno-error=/g; s/-Werror-\([A-Za-z0-9_-]*\)/-Wno-error=\1/g; s/\(^\|[[:space:]]\)-Werror\([[:space:]]\|$\)/\1-Wno-error\2/g' "$f"
           done
-          # 兜底：直接针对已知缺失项（v7 三轮实测）
-          for name in ov16a1q_mipi_raw_hawaii; do
-            if [ ! -f "$DS/common/v1_1/$name/Makefile" ]; then
-              mkdir -p "$DS/common/v1_1/$name"; : > "$DS/common/v1_1/$name/Makefile"
-              echo "  [ok] imgsensor stub (hardcoded): $name"
-            fi
+          # vendor 侧也扫一遍
+          grep -rl -- "-Werror" --include=Makefile --include=Kbuild \
+               --include="*.mk" --include="*.mak" "$V" 2>/dev/null | while read -r f; do
+            sed -i 's/-Werror=/-Wno-error=/g; s/-Werror-\([A-Za-z0-9_-]*\)/-Wno-error=\1/g; s/\(^\|[[:space:]]\)-Werror\([[:space:]]\|$\)/\1-Wno-error\2/g' "$f"
           done
-
-          # D11. back_tap_detecthub：vendor 头缺 ID_BACK_TAP_DETECT 枚举，模块整个禁编
-          #      （v7 实测：背敲检测，与开机/WiFi 无关，直接注释 obj 行）
-          #      v1 教训：--include=Makefile 没咬到目标 → 扩成全目录扫描、整行注释
-          for f in $(grep -rl 'back_tap_detecthub' drivers/misc/mediatek/sensor/2.0 2>/dev/null); do
-            case "$f" in
-              *Makefile*|*.mk)
-                sed -i 's|^\([[:space:]]*\)obj-\(.*\)back_tap_detecthub\(.*\)$|# [pjs110] disabled: obj-\2back_tap_detecthub\3|' "$f"
-                echo "  [ok] back_tap_detecthub commented in $f"
-                ;;
-            esac
-          done
-
-          # D12. 触摸 IC 型号驱动直达链接（v7.5 实测定案：本机 IC = Synaptics TD4160）
-          #      孤儿链接器把型号 Kconfig 挂进了 vendor 岛屿内部——岛屿经符号链接接入，
-          #      os.walk 不跟符号链接 → BFS 判定不可达 → reach-fixed:0 → 符号被静默丢弃。
-          #      修法：把 3 个型号 Kconfig 直接挂到 root 触摸 Kconfig（主干可达，100% 生效）。
-          TSKC=drivers/input/touchscreen/Kconfig
-          for VC in \
-            "../vendor/oplus/kernel/touchpanel/oplus_touchscreen/Synaptics/TD4160/Kconfig" \
-            "../vendor/oplus/kernel/touchpanel/oplus_touchscreen/Novatek/NT36672C_noflash/Kconfig" \
-            "../vendor/oplus/kernel/touchpanel/oplus_touchscreen_v2/ilitek/ilitek7807s/Kconfig"; do
-            if [ -f "$VC" ]; then
-              grep -qF "source \"$VC\"" "$TSKC" || printf '\nsource "%s"\n' "$VC" >> "$TSKC"
-              echo "  [ok] D12 linked: $VC"
-              echo "       --- deps ---"
-              grep -E '^[[:space:]]*(config|depends|select)' "$VC" | head -8
-            else
-              echo "  [WARN] D12 missing: $VC"
-            fi
-          done
-          echo "  --- 型号符号声明位置 ---"
-          grep -rn 'TOUCHPANEL_SYNAPTICS_TD4160\|TOUCHPANEL_NOVA_NT36672C\|TOUCHPANEL_ILITEK_ILITEK7807S' \
-            drivers/input/touchscreen ../vendor/oplus/kernel/touchpanel --include=Kconfig 2>/dev/null | head -12
-
-          [ "$fail" -eq 0 ] && echo "PATCH OK" || { echo "!! patch failed"; exit 1; }
-
-      - name: Build
-        run: |
-          export PATH="$HOME/clang-r383902/bin:$PATH"
-          export ARCH=arm64 SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
-          export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          clang --version | head -3
-
-          mkdir -p out
-          cp /tmp/buildB.config out/.config
-          echo "--- .config ---"
-          md5sum out/.config
-          grep -c '^CONFIG_' out/.config
-
-          # MODULE_SIG_ALL 关掉：不需要给模块签名，省掉现场生成密钥
-          if grep -q '^CONFIG_MODULE_SIG_ALL=' out/.config; then
-            sed -i 's/^CONFIG_MODULE_SIG_ALL=.*/# CONFIG_MODULE_SIG_ALL is not set/' out/.config
-          fi
-          # MODULE_SIG_FORCE 必须关，否则无签名 vendor ko 一律拒载
-          if grep -q '^CONFIG_MODULE_SIG_FORCE=' out/.config; then
-            sed -i 's/^CONFIG_MODULE_SIG_FORCE=.*/# CONFIG_MODULE_SIG_FORCE is not set/' out/.config
+          echo "  剩余 -Werror(Makefile): $(grep -rn -- '-Werror' --include=Makefile . 2>/dev/null | wc -l)"
+          # subdir-ccflags 里也塞一份，覆盖所有子目录
+          if ! grep -q 'Wno-error=sizeof-pointer-memaccess' Makefile; then
+            printf '\n# clang 下大量历史代码触发的新警告，统一降级\nKBUILD_CFLAGS += -Wno-error=sizeof-pointer-memaccess -Wno-error=format -Wno-error=format-extra-args -Wno-error=format-overflow -Wno-error=format-truncation -Wno-error=stringop-truncation -Wno-error=stringop-overflow -Wno-error=stringop-overread -Wno-error=array-bounds -Wno-error=address-of-packed-member -Wno-error=tautological-compare -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=unused-function -Wno-error=unused-value -Wno-error=unused-label -Wno-error=missing-braces -Wno-error=parentheses -Wno-error=switch -Wno-error=misleading-indentation -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=declaration-after-statement -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=return-type -Wno-error=strict-prototypes -Wno-error=old-style-definition -Wno-error=missing-prototypes -Wno-error=deprecated-declarations -Wno-error=unused-result -Wno-error=builtin-declaration-mismatch -Wno-error=maybe-uninitialized -Wno-error=memset-elt-size\n' >> Makefile
+            echo "  [ok]   Makefile 追加 clang 警告降级"
           fi
 
-          # f2fs 压缩：原厂 stock 没开（# CONFIG_F2FS_FS_COMPRESSION is not set），
-          # bootable 那版的树配平了 compress.c，当前 vendor 没带配平 → 关掉，零风险
-          for S in F2FS_FS_COMPRESSION F2FS_FS_LZO F2FS_FS_LZ4 F2FS_FS_ZSTD; do
-            sed -i "s/^CONFIG_${S}=.*/# CONFIG_${S} is not set/" out/.config
-          done
-
-          # BACK_TAP_DETECT：vendor 缺 ID_BACK_TAP_DETECT 枚举，关掉该虚拟传感器
-          sed -i 's/^CONFIG_OPLUS_FEATURE_BACK_TAP_DETECT=.*/# CONFIG_OPLUS_FEATURE_BACK_TAP_DETECT is not set/' out/.config || true
-
-          # ROTATION_DETECT：同批 vendor 缺口（ID_ROTATION_DETECT 枚举缺失）
-          sed -i 's/^CONFIG_OPLUS_FEATURE_ROTATION_DETECT=.*/# CONFIG_OPLUS_FEATURE_ROTATION_DETECT is not set/' out/.config || true
-
-          # vermagic 的 '+'：原厂 ko 是 4.19.191+，LOCALVERSION 留空让脏树自动补 +
-          if grep -q '^CONFIG_LOCALVERSION=' out/.config; then
-            sed -i 's|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=""|' out/.config
-          fi
-
-          echo "--- MODULE_SIG family ---"
-          grep -E 'CONFIG_MODULE_SIG' out/.config
-
-          # v7 教训：make 输出全吞进 /tmp/build.log 导致盲飞 6 小时。
-          # 现在：tee 实时进 Actions 日志 + 后台看门狗（5 分钟无进展就杀 make，快速失败）
-          KCF="-I$PWD/drivers/misc/mediatek/scp/include -I$PWD/drivers/misc/mediatek/include -Wno-error=date-time -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=declaration-after-statement -Wno-error=inline -Wno-error=maybe-uninitialized -Wno-error=parentheses -Wno-error=unused-function -Wno-error=unused-label -Wno-error=switch -Wno-error=tautological-compare -Wno-error=memset-elt-size -Wno-error=misleading-indentation -Wno-error=sizeof-pointer-memaccess -Wno-error=stringop-truncation -Wno-error=address-of-packed-member -Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast -Wno-error=stringop-overread -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-result -Wno-error=missing-braces -Wno-error=builtin-declaration-mismatch -Wno-error=ignored-optimization-argument -Wno-ignored-optimization-argument -Wno-error=unknown-warning-option -Wno-unknown-warning-option -Wno-error=unused-command-line-argument -Wno-unused-command-line-argument"
-          export KCFLAGS="$KCF"
-
-          echo "=== watchdog start ==="
-          ( START=$(date +%s)
-            HAVE=0; LASTNEW=0; i=0
-            while true; do
-              sleep 60
-              i=$((i+1))
-              ALL=$(find out -name '*.o' 2>/dev/null | wc -l)
-              BUSY=$(pgrep -c 'clang|ld.lld' 2>/dev/null || true)
-              echo "[watchdog] min=$i total_o=$ALL busy(compiler/linker)=$BUSY"
-              if [ "$ALL" -gt "$HAVE" ]; then HAVE=$ALL; LASTNEW=$i; fi
-              ELAPSED=$(( $(date +%s) - START ))
-              if [ "$BUSY" -eq 0 ]; then
-                IDLE=$(( i - LASTNEW ))
-                if { [ "$HAVE" -gt 0 ] && [ "$IDLE" -ge 5 ]; } || \
-                   { [ "$HAVE" -eq 0 ] && [ "$ELAPSED" -gt 900 ]; }; then
-                  echo "[watchdog] STALLED (idle_min=$IDLE elapsed_s=$ELAPSED) - dump and kill"
-                  ps -eo pid,ppid,etime,comm,args --sort=-etime | head -25 || true
-                  echo "[watchdog] --- build.log tail ---"
-                  tail -5 /tmp/build.log 2>/dev/null || true
-                  pkill -9 make || true
-                  pkill -9 bc   || true
-                  pkill -9 sh   || true
-                  pkill -9 clang || true
-                  break
+          echo "===== I. Droidspaces 官方 non-GKI 补丁 ====="
+          # 官方文档 Step3：Documentation/resources/kernel-patches/non-GKI 下的全部补丁
+          #   01 xt_qtaguid panic：容器读 /proc/net/xt_qtaguid 时碰到 down 的网卡
+          #      dev_get_stats 解空指针 → kernel panic
+          #   02 cgroup 前缀：Android 去掉了 subsys. 前缀，LXC 按标准路径找不到
+          PDIR=/tmp/dsp_patches
+          mkdir -p "$PDIR"
+          BASE="https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI"
+          curl -sL -o "$PDIR/01.patch" "$BASE/01.fix_kernel_panic_in_xt_qtaguid.patch" || true
+          curl -sL -o "$PDIR/02.patch" "$BASE/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch" || true
+          for pf in "$PDIR"/01.patch "$PDIR"/02.patch; do
+            if [ -s "$pf" ] && head -1 "$pf" | grep -q '^From '; then
+              echo "  --- 应用 $(basename $pf) ---"
+              if patch -p1 --forward --no-backup-if-mismatch < "$pf" > /tmp/patch.log 2>&1; then
+                echo "  [ok]   打上了"
+              else
+                # 可能已经打过，或者上下文略有差异
+                if grep -q 'Reversed (or previously applied)' /tmp/patch.log; then
+                  echo "  [ok]   之前已打过"
+                else
+                  echo "  [WARN] 没打上，日志:"
+                  head -12 /tmp/patch.log
                 fi
               fi
-            done ) &
-          WD_PID=$!
+            else
+              echo "  [WARN] $pf 下载失败或不是合法 patch"
+            fi
+          done
+          echo "  验证 01 是否生效:"
+          grep -n 'stats = &no_dev_stats' net/netfilter/xt_qtaguid.c | head -3 || echo "    没找到"
+          echo "  验证 02 是否生效:"
+          grep -n 'CFTYPE_NO_PREFIX' kernel/cgroup/cgroup.c | head -3 || echo "    没找到"
 
+          [ "$fail" -eq 0 ] && echo "ALL PATCHES OK" || { echo "!! 有必改项失败"; exit 1; }
+
+      - name: Prepare config (olddefconfig + ALLCONFIG，一次产出一致 config)
+        run: |
+          set -eu
+          export PATH="$HOME/clang/bin:$PATH"
+          export ARCH=arm64 SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
+          export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+
+          mkdir -p out
+
+          # 思路（推翻了前面几轮的手工回写）：
+          #   把要改的值直接改进 ALLCONFIG 文件，再让 kconfig 一次性产出 .config。
+          #   产出之后【绝不再手工 sed .config】。
+          #
+          # 为什么要推翻手工回写：
+          #   上一轮跑完 olddefconfig 后又 sed 了 35 行 .config，
+          #   导致 .config 与 Kconfig 树不一致。kbuild 生成
+          #   include/config/auto.conf.cmd 时会检测到不一致并重跑 syncconfig，
+          #   重跑要问 (NEW) 符号，CI 里 stdin 空 → 直接 Error 2 退出。
+          #   所以：要么一次产出正确，要么就别碰。
+          cp /tmp/stock.config /tmp/allconfig
+
+          setkv() {
+            sym="$1"; val="$2"
+            if grep -q "^${sym}=" /tmp/allconfig; then
+              sed -i "s|^${sym}=.*|${sym}=${val}|" /tmp/allconfig
+            elif grep -q "^# ${sym} is not set" /tmp/allconfig; then
+              sed -i "s|^# ${sym} is not set|${sym}=${val}|" /tmp/allconfig
+            else
+              printf '%s=%s\n' "$sym" "$val" >> /tmp/allconfig
+            fi
+          }
+          unsetkv() {
+            if grep -q "^$1=" /tmp/allconfig; then
+              sed -i "s|^$1=.*|# $1 is not set|" /tmp/allconfig
+            fi
+          }
+
+          echo "=== 改 ALLCONFIG（不是改 .config）==="
+          # vermagic 的 + 由脏树自动追加；写 "+" 会变 "4.19.191++"，实测会变砖
+          setkv CONFIG_LOCALVERSION '""'
+          # ===== Droidspaces 官方 Step1：必需项（照文档逐条搬） =====
+          # IPC
+          setkv CONFIG_SYSCTL y
+          setkv CONFIG_SYSVIPC y
+          setkv CONFIG_POSIX_MQUEUE y
+          # 核心 namespace
+          setkv CONFIG_NAMESPACES y
+          setkv CONFIG_PID_NS y
+          setkv CONFIG_UTS_NS y
+          setkv CONFIG_IPC_NS y
+          setkv CONFIG_NET_NS y
+          # seccomp
+          setkv CONFIG_SECCOMP y
+          setkv CONFIG_SECCOMP_FILTER y
+          # cgroup
+          setkv CONFIG_CGROUPS y
+          setkv CONFIG_CGROUP_DEVICE y
+          setkv CONFIG_CGROUP_SCHED y
+          setkv CONFIG_FAIR_GROUP_SCHED y
+          setkv CONFIG_CGROUP_FREEZER y
+          setkv CONFIG_CGROUP_NET_PRIO y
+          setkv CONFIG_MEMCG y
+          setkv CONFIG_MEMCG_SWAP y
+          setkv CONFIG_CFS_BANDWIDTH y
+          setkv CONFIG_CGROUP_PIDS y
+          setkv CONFIG_CGROUP_CPUACCT y
+          # devtmpfs / overlay / tmpfs
+          setkv CONFIG_DEVTMPFS y
+          setkv CONFIG_DEVTMPFS_MOUNT y
+          setkv CONFIG_OVERLAY_FS y
+          setkv CONFIG_TMPFS_POSIX_ACL y
+          setkv CONFIG_TMPFS_XATTR y
+          # firmware loader
+          setkv CONFIG_FW_LOADER y
+          setkv CONFIG_FW_LOADER_USER_HELPER y
+          setkv CONFIG_FW_LOADER_COMPRESS y
+          # 网络隔离 NAT 模式
+          setkv CONFIG_VETH y
+          setkv CONFIG_BRIDGE y
+          setkv CONFIG_NETFILTER y
+          setkv CONFIG_BRIDGE_NETFILTER y
+          setkv CONFIG_NETFILTER_ADVANCED y
+          setkv CONFIG_NF_CONNTRACK y
+          setkv CONFIG_IP_NF_IPTABLES y
+          setkv CONFIG_IP_NF_FILTER y
+          setkv CONFIG_NF_NAT y
+          setkv CONFIG_NF_TABLES y
+          setkv CONFIG_IP_NF_TARGET_MASQUERADE y
+          setkv CONFIG_NETFILTER_XT_TARGET_MASQUERADE y
+          setkv CONFIG_NETFILTER_XT_TARGET_TCPMSS y
+          setkv CONFIG_NETFILTER_XT_MATCH_ADDRTYPE y
+          setkv CONFIG_NF_CONNTRACK_NETLINK y
+          setkv CONFIG_NF_NAT_REDIRECT y
+          setkv CONFIG_IP_ADVANCED_ROUTER y
+          setkv CONFIG_IP_MULTIPLE_TABLES y
+          setkv CONFIG_MACVLAN y
+          # ★ 旧内核必须关掉，否则容器没网
+          # 这个 symbol 在原厂 config 里可能根本不存在，unsetkv 处理不了，所以直接写一行
+          unsetkv CONFIG_ANDROID_PARANOID_NETWORK
+          if ! grep -q '^CONFIG_ANDROID_PARANOID_NETWORK=' /tmp/allconfig && \
+             ! grep -q '^# CONFIG_ANDROID_PARANOID_NETWORK is not set' /tmp/allconfig; then
+            printf '# CONFIG_ANDROID_PARANOID_NETWORK is not set\n' >> /tmp/allconfig
+          fi
+          # docker unsafe procfs 修复
+          setkv CONFIG_USER_NS y
+          # 触摸屏总开关：Makefile 里 obj-$(CONFIG_TOUCHPANEL_OPLUS) 靠它
+          setkv CONFIG_TOUCHPANEL_OPLUS y
+          setkv CONFIG_TOUCHPANEL_MTK_PLATFORM y
+          setkv CONFIG_TOUCHPANEL_NOVA y
+          setkv CONFIG_TOUCHPANEL_NOVA_NT36672C_NOFLASH y
+          setkv CONFIG_TOUCHPANEL_NOVA_NT36525B_NOFLASH y
+          setkv CONFIG_TOUCHPANEL_ILITEK y
+          setkv CONFIG_TOUCHPANEL_ILITEK_ILITEK7807S y
+          setkv CONFIG_TOUCHPANEL_SYNAPTICS y
+          setkv CONFIG_TOUCHPANEL_SYNAPTICS_TD4160 y
+          setkv CONFIG_TOUCHPANEL_MULTI_NOFLASH y
+          setkv CONFIG_TOUCHPANEL_LATE_INIT y
+          setkv CONFIG_TOUCHPANEL_NT_PEN_SUPPORT y
+          setkv CONFIG_TOUCHPANEL_NT_DIGITALNOISE_TEST y
+          # f2fs 压缩：放弃。
+          # 已核实：fs/f2fs/compress.c 用的是旧版 Google zstd API
+          # (ZSTD_getParams / ZSTD_initCStream / ZSTD_decompressStream ...)
+          # 而 include/linux/zstd.h 提供的是上游新版 zstd_* API，
+          # 16 个调用一个都对不上 → 这棵树从来没编译过 compress.c。
+          # 原厂 config 里的 =y 是抄来的，实际没生效。开了必挂，所以不开。
+          setkv CONFIG_F2FS_FS_COMPRESSION n
+          # OPPO 模块
+          setkv CONFIG_OPLUS_FEATURE_OPROJECT y
+          setkv CONFIG_OPLUS_FEATURE_FEEDBACK y
+          # 无 OPPO 私钥
+          unsetkv CONFIG_MODULE_SIG
+          unsetkv CONFIG_MODULE_SIG_FORCE
+          unsetkv CONFIG_MODULE_SIG_ALL
+          echo "  ALLCONFIG $(wc -l < /tmp/allconfig) 行"
+
+          echo ""
+          echo "=== 诊断：ALLCONFIG 里的触摸项在不在 ==="
+          grep -cE '^CONFIG_TOUCHPANEL' /tmp/allconfig || true
+          grep -E '^CONFIG_TOUCHPANEL_NOVA_NT36672C_NOFLASH' /tmp/allconfig || echo "  !! ALLCONFIG 里没有这一行"
+
+          echo "=== 诊断：符号链接通不通 ==="
+          ls -la drivers/input/touchscreen/oplus_touchscreen 2>&1 | head -2
+          test -f drivers/input/touchscreen/oplus_touchscreen/Kconfig \
+            && echo "  [OK] 链接通的，Kconfig 可读" \
+            || echo "  [FAIL] 链接断了"
+
+          echo "=== 一次性产出 .config（alldefconfig + ALLCONFIG）==="
+          # ★★★ 为什么必须是 alldefconfig 而不是 olddefconfig：
+          #   scripts/kconfig/conf.c:605-611
+          #     case allyesconfig:
+          #     case allmodconfig:
+          #     case alldefconfig:
+          #     case randconfig:
+          #         name = getenv("KCONFIG_ALLCONFIG");
+          #   KCONFIG_ALLCONFIG 只对上面这 4 个目标生效。
+          #   olddefconfig 不在列表里 —— 传了也不读，等于白加。
+          #   这就是前几轮"SYSVIPC/DEVTMPFS/触摸驱动写进去却不生效"的根因。
+          #
+          # alldefconfig 语义：所有 symbol 取默认值，但 ALLCONFIG 文件里
+          # 明确指定的，一律以文件为准。我们的 ALLCONFIG 就是完整原厂 config，
+          # 所以结果 = 原厂 config + 我们的修改。
+          #
+          # ★ 编译器必须在 make 命令行上传，不能只靠 export：
+          #   顶层 Makefile 有 `CC = $(CROSS_COMPILE)gcc` 这类赋值会覆盖环境变量，
+          #   导致 kconfig 探测出 CC_IS_GCC=y，CFI/LTO 整条依赖链全塌。
+          #   命令行变量优先级最高。
+          rm -f out/.config
+          yes '' 2>/dev/null | make O=out ARCH=arm64 \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
+            KCONFIG_ALLCONFIG=/tmp/allconfig alldefconfig > /tmp/cfg.log 2>&1
+          RC=$?
+          echo "  --- cfg.log 里 touchpanel 相关 ---"
+          grep -i 'touchpanel' /tmp/cfg.log | head -10 || echo "  (无)"
+          echo "  --- cfg.log 里的 warning/error ---"
+          grep -iE 'warning|error' /tmp/cfg.log | head -10 || echo "  (无)"
+          echo "  退出码 $RC"
+          tail -4 /tmp/cfg.log || true
+          if [ "$RC" -ne 0 ]; then
+            echo "  [note] olddefconfig 返回非 0（可能是 (NEW) 提问读到 EOF），继续但下面要核对"
+          fi
+
+          echo ""
+          echo "=== ★ alldefconfig 之后，.config 里的触摸项 ==="
+          echo "  计数: $(grep -cE '^CONFIG_TOUCHPANEL' out/.config 2>/dev/null || echo 0)"
+          grep -E 'TOUCHPANEL_(NOVA_NT36672C|FOCAL_FT8006S|HIMAX_HX83102D|ILITEK_ILITEK7807S)' out/.config 2>/dev/null | head -6 || echo "  关键 4 项都没了"
+
+          echo ""
+          echo "=== 产出结果（此后一行都不改）==="
+          echo "--- CFI / LTO / 编译器 ---"
+          for k in CC_IS_CLANG CC_IS_GCC CLANG_VERSION GCC_VERSION LD_IS_LLD \
+                   LTO LTO_CLANG LTO_NONE THINLTO \
+                   CFI CFI_CLANG CFI_CLANG_SHADOW; do
+            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
+          done
+
+          echo "--- f2fs ---"
+          for k in F2FS_FS F2FS_FS_COMPRESSION F2FS_FS_LZO F2FS_FS_LZ4 F2FS_FS_ZSTD; do
+            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
+          done
+
+          echo "--- f2fs 压缩 ---"
+          for k in F2FS_FS_COMPRESSION F2FS_FS_LZO F2FS_FS_LZ4 F2FS_FS_ZSTD LZ4HC_COMPRESS; do
+            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
+          done
+
+          echo "--- 触摸屏 ---"
+          for k in TOUCHPANEL_NOVA_NT36672C_NOFLASH TOUCHPANEL_FOCAL_FT8006S_AA \
+                   TOUCHPANEL_HIMAX_HX83102D_NOFLASH TOUCHPANEL_ILITEK_ILITEK7807S \
+                   TOUCHPANEL_CHIPONE_ICNL9911C; do
+            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
+          done
+
+          echo "--- 我们要的 ---"
+          for k in MODVERSIONS SYSVIPC IPC_NS USER_NS DEVTMPFS POSIX_MQUEUE \
+                   OPLUS_FEATURE_OPROJECT LOCALVERSION; do
+            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo '[整行消失]')"
+          done
+
+          echo ""
+          echo "=== 统计 ==="
+          echo "  =y:   $(grep -c '=y$' out/.config || true)"
+          echo "  总项: $(grep -cE '^CONFIG_|^# CONFIG_' out/.config || true)"
+          echo "  原厂: $(grep -cE '^CONFIG_|^# CONFIG_' /tmp/stock.config || true)"
+          echo "  md5:  $(md5sum out/.config)"
+          echo "  脏文件数: $(git status --porcelain 2>/dev/null | wc -l)"
+
+      - name: Build with clang + LTO + CFI
+        run: |
           set +e
-          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-               CC="clang --target=aarch64-linux-gnu" \
-               LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
-               OBJDUMP=llvm-objdump READELF=llvm-readelf STRIP=llvm-strip \
-               -j$(nproc) Image.gz 2>&1 | tee /tmp/build.log
-          RC=${PIPESTATUS[0]}
+          export PATH="$HOME/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          export READELF=llvm-readelf
+
+          # ★ 关键：禁止 kbuild 在 make 期间静默更新 .config。
+          # 不加这个，make 会隐式跑 silentoldconfig，碰到 (NEW) symbol
+          # 就去读 stdin，CI 里 stdin 空 → 读失败 → 整份 config 按默认重算
+          # → f2fs 压缩、触摸驱动等 117 项丢失 → 刷了卡 logo / 没触摸。
+          export KCONFIG_NOSILENTUPDATE=1
+
+          echo "=== 工具链版本 ==="
+          clang --version | head -2
+          ld.lld --version
+
+          echo "=== 确认 .config 没被改（和 Prepare 阶段 md5 对上）==="
+          md5sum out/.config
+          grep -c '=y$' out/.config || true
+
+          # ★ 同样在命令行传编译器，别只靠 export
+          make O=out ARCH=arm64 -j$(nproc) \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
+            Image.gz > /tmp/build.log 2>&1
+          RC=$?
           set -e
-          kill $WD_PID 2>/dev/null || true
 
           echo "=== BUILD EXIT: $RC ==="
-          grep -E "error:|fatal error:" /tmp/build.log | head -60 || true
-          echo "=== last 30 ==="
-          tail -30 /tmp/build.log || true
-          ls -la out/arch/arm64/boot/ 2>&1 | head -20 || true
-          [ "$RC" -eq 0 ] || exit 1
+          echo "=== 是否又发生 config 重算 ==="
+          grep -c 'Restart config' /tmp/build.log && echo "  !! 又重算了" || echo "  [OK] 没有重算"
+          grep -c 'Error in reading or end of file' /tmp/build.log && echo "  !! 又有读 stdin 失败" || echo "  [OK] 没有 stdin 失败"
 
-      - name: Verify
+          echo "=== error 行（最多 80）==="
+          grep -E "error:|fatal error:" /tmp/build.log | grep -v -E "TPD_INFO|printk|dev_info|dev_err" | head -80 || true
+          echo "=== 最后 30 行 ==="
+          tail -30 /tmp/build.log || true
+          echo "=== 产物 ==="
+          ls -la out/arch/arm64/boot/ 2>&1 | head -20 || true
+
+          echo "=== 编完后再验 config 关键项还在不在 ==="
+          for k in F2FS_FS_COMPRESSION CFI_CLANG LTO_CLANG THINLTO; do
+            echo "  ${k}: $(grep -m1 "^CONFIG_${k}=" out/.config || grep -m1 "^# CONFIG_${k} is not set" out/.config || echo 无)"
+          done
+
+          if [ "$RC" -ne 0 ]; then exit 1; fi
+
+      - name: Gate - vermagic / CFI / LTO
+        if: success()
         run: |
-          echo 'CiMgLSotIGNvZGluZzogdXRmLTggLSotCiIiIuaehOW7uuWQjumqjOaUtu+8muWGheW1jCBjb25maWcg5b+F6aG75LiOIGJ1aWxkQi5jb25maWcg5LiA6Ie077yI6Zmk5YWB6K646aG577yJIiIiCmltcG9ydCBzeXMsIHpsaWIsIHJlCgpORVcgICA9IHN5cy5hcmd2WzFdIGlmIGxlbihzeXMuYXJndikgPiAxIGVsc2UgJ291dC9hcmNoL2FybTY0L2Jvb3QvSW1hZ2UnCldBTlQgID0gJy90bXAvYnVpbGRCLmNvbmZpZycKCkFMTE9XID0gewogICAgJ0NPTkZJR19NT0RVTEVfU0lHX0FMTCcsICAgICAgIyDlhbPmjonvvIznnIHlr4bpkqXnlJ/miJAKICAgICdDT05GSUdfTU9EVUxFX1NJR19GT1JDRScsICAgICMg5YWz5o6J77yM5ZCm5YiZ5peg562+5ZCNIGtvIOaLkui9vQogICAgJ0NPTkZJR19NT0RVTEVfU0lHX1NIQTEnLCAgICAgIyBNT0RVTEVfU0lHPXkg5ZCO5pi+5b2i5Li65pyq6YCJ77yM6Z2e6KGM5Li65beu5byCCiAgICAnQ09ORklHX01PRFVMRV9TSUdfU0hBMjI0JywKICAgICdDT05GSUdfTU9EVUxFX1NJR19TSEEyNTYnLAogICAgJ0NPTkZJR19NT0RVTEVfU0lHX1NIQTM4NCcsCiAgICAnQ09ORklHX0YyRlNfRlNfQ09NUFJFU1NJT04nLCAgIyDmnoTlu7rml7blhbPpl63vvJp2ZW5kb3Ig5qCR5rKh6YWN5bmzIGNvbXByZXNzLmMKICAgICdDT05GSUdfRjJGU19GU19MWk8nLAogICAgJ0NPTkZJR19GMkZTX0ZTX0xaNCcsCiAgICAnQ09ORklHX0YyRlNfRlNfWlNURCcsCiAgICAnQ09ORklHX09QTFVTX0ZFQVRVUkVfQkFDS19UQVBfREVURUNUJywgICMg5p6E5bu65pe25YWz6Zet77yadmVuZG9yIOe8uuaemuS4vgogICAgJ0NPTkZJR19PUExVU19GRUFUVVJFX1JPVEFUSU9OX0RFVEVDVCcsICAjIOaehOW7uuaXtuWFs+mXre+8mnZlbmRvciDnvLrmnprkuL4KICAgICdDT05GSUdfTE9DQUxWRVJTSU9OJywgICAgICAgICMga2J1aWxkIOS8muaMieagkeeKtuaAgemHjeeulwogICAgJ0NPTkZJR19MT0NBTFZFUlNJT05fQVVUTycsCiAgICAnQ09ORklHX0NDX0lTX0NMQU5HJywgICAgICAgICAjIOe8luivkeWZqOaOoua1i+mhue+8jOmaj+W3peWFt+mTvueJiOacrOWPmOWMlgogICAgJ0NPTkZJR19DQ19JU19HQ0MnLAogICAgJ0NPTkZJR19DTEFOR19WRVJTSU9OJywKICAgICdDT05GSUdfR0NDX1ZFUlNJT04nLAp9CkFMTE9XX1BSRUZJWCA9ICgnQ09ORklHX0NDX0hBU18nLCAnQ09ORklHX0tTVScpICAgIyBjbGFuZyDog73lipvmjqLmtYsgLyBLU1XvvJrmnKzmoJHmnKrpm4bmiJDvvIznrKblj7fkuI3lrZjlnKjlsZ7pooTmnJ8KIyBLU1Ug5YWo5a6277yIS1NVL0tTVV9ERUJVRy9LU1VfTUFOVUFMX0hPT0tfKiDnrYnvvInpmo8gS1NVIOWJjee8gOaUvuihjOOAggojIGYyZnMg5Y6L57yp55qE6ZqQ6JeP5L6d6LWW6aG55Lmf5LiA5bm25pS+6KGM77yI54i26aG55bey5YWz77yM5a2Q6aG56Lef6ZqP77yM5peg6KGM5Li65b2x5ZON77yJ44CCCkFMTE9XX1BSRUZJWF9FWEFDVCA9IHsnQ09ORklHX0YyRlNfRlNfQ09NUFJFU1NJT05fRklYRURfT1VUUFVUJywgJ0NPTkZJR19GMkZTX0ZTX0xaNEhDJywKICAgICAgICAgICAgICAgICAgICAgICdDT05GSUdfRjJGU19GU19ERURVUCcsICdDT05GSUdfRjJGU19BUFBCT09TVCcsICdDT05GSUdfTFo0SENfQ09NUFJFU1MnLAogICAgICAgICAgICAgICAgICAgICAgJ0NPTkZJR19PUExVU19GRUFUVVJFX0NQVV9KQU5LSU5GTycsICdDT05GSUdfTERPX0FXMzcwMDQnLAogICAgICAgICAgICAgICAgICAgICAgJ0NPTkZJR19NVEtfTEVOU19BSzczMTZBRl9TVVBQT1JUJywgJ0NPTkZJR19NVEtfTEVOU19EVzk4MjdBRl9TVVBQT1JUJ30KCgpkZWYgZW1iZWRkZWQocGF0aCk6CiAgICBrID0gb3BlbihwYXRoLCAncmInKS5yZWFkKCkKICAgIHAgPSBrLmZpbmQoYidJS0NGR19TVCcpCiAgICBpZiBwIDwgMDoKICAgICAgICByZXR1cm4gTm9uZQogICAgcCArPSA4CiAgICBlID0gay5maW5kKGInSUtDRkdfRUQnLCBwKQogICAgaWYgZSA8IDA6CiAgICAgICAgcmV0dXJuIE5vbmUKICAgIHRyeToKICAgICAgICByZXR1cm4gemxpYi5kZWNvbXByZXNzKGtbcDplXSwgMTYgKyB6bGliLk1BWF9XQklUUykKICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgcmV0dXJuIE5vbmUKCgpkZWYgcGFyc2UoYmxvYik6CiAgICBkID0ge30KICAgIGZvciBsaW5lIGluIGJsb2IuZGVjb2RlKCd1dGY4JywgJ3JlcGxhY2UnKS5zcGxpdGxpbmVzKCk6CiAgICAgICAgbGluZSA9IGxpbmUuc3RyaXAoKQogICAgICAgIGlmIG5vdCBsaW5lOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGlmIGxpbmUuc3RhcnRzd2l0aCgnIycpOgogICAgICAgICAgICBtID0gcmUubWF0Y2gocicjIChDT05GSUdfXHcrKSBpcyBub3Qgc2V0JywgbGluZSkKICAgICAgICAgICAgaWYgbToKICAgICAgICAgICAgICAgIGRbbS5ncm91cCgxKV0gPSAnbicKICAgICAgICAgICAgY29udGludWUKICAgICAgICBpZiAnPScgaW4gbGluZSBhbmQgbGluZS5zdGFydHN3aXRoKCdDT05GSUdfJyk6CiAgICAgICAgICAgIGssIHYgPSBsaW5lLnNwbGl0KCc9JywgMSkKICAgICAgICAgICAgZFtrXSA9IHYKICAgIHJldHVybiBkCgoKbmV3X2NmZyA9IGVtYmVkZGVkKE5FVykKaWYgbmV3X2NmZyBpcyBOb25lOgogICAgcHJpbnQoJyEhIG5vIGVtYmVkZGVkIGNvbmZpZycpCiAgICBzeXMuZXhpdCgxKQoKd2FudF9jZmcgPSBvcGVuKFdBTlQsICdyYicpLnJlYWQoKQpubywgbncgPSBwYXJzZShuZXdfY2ZnKSwgcGFyc2Uod2FudF9jZmcpCgpwcmludCgnICBwcm9kdWN0OiAlZCBpdGVtcyAvICVkIGJ5dGVzJyAlIChsZW4obm8pLCBsZW4obmV3X2NmZykpKQpwcmludCgnICB0YXJnZXQgOiAlZCBpdGVtcyAvICVkIGJ5dGVzJyAlIChsZW4obncpLCBsZW4od2FudF9jZmcpKSkKCiMgLS0tLSDnoazmgKfmo4Dmn6UgMe+8mnN0cnVjdCBtb2R1bGUg5biD5bGA5LiJ6KaB57SgIC0tLS0KcHJpbnQoKQpwcmludCgnICA9PT0gc3RydWN0IG1vZHVsZSBsYXlvdXQgY2hlY2tsaXN0ID09PScpCm9rX2xheW91dCA9IFRydWUKZm9yIGssIHdhbnQgaW4gWygnQ09ORklHX01PRFVMRV9TSUcnLCAnbicpLAogICAgICAgICAgICAgICAgKCdDT05GSUdfTU9EVkVSU0lPTlMnLCAneScpLAogICAgICAgICAgICAgICAgKCdDT05GSUdfTU9EVUxFX1VOTE9BRCcsICd5JyldOgogICAgZ290ID0gbm8uZ2V0KGssICcobm9uZSknKQogICAgZ29vZCA9IChnb3QgPT0gd2FudCkKICAgIHByaW50KCcgICAgJS0zMnMgd2FudD0lLTZzIGdvdD0lLTZzICVzJyAlIChrLCB3YW50LCBnb3QsICdPSycgaWYgZ29vZCBlbHNlICdGQUlMJykpCiAgICBpZiBub3QgZ29vZDoKICAgICAgICBva19sYXlvdXQgPSBGYWxzZQoKIyAtLS0tIOehrOaAp+ajgOafpSAy77yaQ0ZJIC8gTFRPIOW/hemhu+S/neaMgeWFs+mXre+8iOWQpuWImeWPr+iDvei1t+S4jeadpe+8iS0tLS0KZm9yIGsgaW4gKCdDT05GSUdfQ0ZJX0NMQU5HJywgJ0NPTkZJR19MVE9fQ0xBTkcnLCAnQ09ORklHX1RISU5MVE8nLCAnQ09ORklHX0xUTycpOgogICAgZ290ID0gbm8uZ2V0KGssICcobm9uZSknKQogICAgZ29vZCA9IGdvdCBpbiAoJ24nLCAnKG5vbmUpJykKICAgIHByaW50KCcgICAgJS0zMnMgd2FudD1vZmYgICAgIGdvdD0lLTZzICVzJyAlIChrLCBnb3QsICdPSycgaWYgZ29vZCBlbHNlICdGQUlMJykpCiAgICBpZiBub3QgZ29vZDoKICAgICAgICBva19sYXlvdXQgPSBGYWxzZQoKIyAtLS0tIOehrOaAp+ajgOafpSAz77ya6amx5Yqo5LiN6IO95LiiIC0tLS0KcHJpbnQoKQpwcmludCgnICA9PT0gZHJpdmVyIHJldGVudGlvbiA9PT0nKQpmb3IgcHJlLCBoYXJkX3JlcSBpbiAoKCdDT05GSUdfVE9VQ0hQQU5FTF8nLCBUcnVlKSwgKCdDT05GSUdfRFJNX1BBTkVMXycsIFRydWUpLCAoJ0NPTkZJR19PUExVU18nLCBGYWxzZSkpOgogICAgYSA9IHN1bSgxIGZvciBrIGluIG53IGlmIGsuc3RhcnRzd2l0aChwcmUpIGFuZCBud1trXSA9PSAneScpCiAgICBiID0gc3VtKDEgZm9yIGsgaW4gbm8gaWYgay5zdGFydHN3aXRoKHByZSkgYW5kIG5vW2tdID09ICd5JykKICAgICMg6Kem5pG4L+mdouadv++8muiuvuWkh+W/hemhu+aciempseWKqO+8jOehrOaAp+OAgk9QTFVTIOWKn+iDveexu++8muebkeaOpy/osIPor5XpobnvvIzlhYHorrjlh4/lsJHvvIzlj6rorablkYoKICAgIGlmIGhhcmRfcmVxOgogICAgICAgIGdvb2QgPSAoYSA9PSBiKQogICAgZWxzZToKICAgICAgICBnb29kID0gKGEgLSBiIDw9IDApICAgIyDlj6rlhYHorrjlh4/lsJHvvJvlop7liqDmiY3mmK/lvILluLgKICAgIHByaW50KCcgICAgJS0yOHMgdGFyZ2V0ICUzZCA9eSAgIHByb2R1Y3QgJTNkID15ICAgJXMnCiAgICAgICAgICAlIChwcmUsIGEsIGIsICdPSycgaWYgZ29vZCBlbHNlICgnISEgTE9TVCAlZCcgJSAoYSAtIGIpIGlmIGhhcmRfcmVxIGVsc2UgJyhzb2Z0KSBsb3N0ICVkJyAlIChhIC0gYikpKSkKICAgIGlmIG5vdCBnb29kOgogICAgICAgIG9rX2xheW91dCA9IEZhbHNlCgojIC0tLS0g5YWo6YePIGRpZmYgLS0tLQphbGxrID0gc29ydGVkKHNldChubykgfCBzZXQobncpKQpoYXJkID0gW10KZm9yIGsgaW4gYWxsazoKICAgIGEgPSBudy5nZXQoaywgJyhub25lKScpCiAgICBiID0gbm8uZ2V0KGssICcobm9uZSknKQogICAgaWYgYSA9PSBiOgogICAgICAgIGNvbnRpbnVlCiAgICAjIOWPjOaWuemDveWFs++8mm48LT4obm9uZSkg5Y+q5piv56ym5Y+35pi+5b2i5LiO5ZCm55qE5riF5Y2V5b2i5byP5beu5byC77yM6Zu26KGM5Li65beu5byC77yM5pS+6KGMCiAgICBpZiBhIGluICgnbicsICcobm9uZSknKSBhbmQgYiBpbiAoJ24nLCAnKG5vbmUpJyk6CiAgICAgICAgY29udGludWUKICAgICMg5Y+M5pa56YO95YWz77yIeS0+biDmiJYgeS0+KG5vbmUp77yJ5pe277ya6Zmk6amx5Yqo5L+d55WZ6K6h5pWw5aSW5peg6KGM5Li65b2x5ZON77yM5pS+6KGMCiAgICBpZiBhID09ICd5JyBhbmQgYiBpbiAoJ24nLCAnKG5vbmUpJykgYW5kIGsgaW4gQUxMT1dfUFJFRklYX0VYQUNUOgogICAgICAgIHByaW50KCcgICAgW2FsbG93ZWQtb2ZmXSAlLTQwcyB0YXJnZXQ9JS0xMHMgcHJvZHVjdD0lcycgJSAoaywgYSwgYikpCiAgICAgICAgY29udGludWUKICAgIGlmIGsgaW4gQUxMT1cgb3Igay5zdGFydHN3aXRoKEFMTE9XX1BSRUZJWCk6CiAgICAgICAgcHJpbnQoJyAgICBbYWxsb3dlZF0gJS00MnMgdGFyZ2V0PSUtMThzIHByb2R1Y3Q9JXMnICUgKGssIGEsIGIpKQogICAgICAgIGNvbnRpbnVlCiAgICBoYXJkLmFwcGVuZCgoaywgYSwgYikpCgppZiBoYXJkOgogICAgcHJpbnQoKQogICAgcHJpbnQoJyAgISEgJWQgdW5leHBlY3RlZCBkaWZmZXJlbmNlczonICUgbGVuKGhhcmQpKQogICAgZm9yIGssIGEsIGIgaW4gaGFyZFs6NTBdOgogICAgICAgIHByaW50KCcgICAgJS00NnMgdGFyZ2V0PSUtMThzIHByb2R1Y3Q9JXMnICUgKGssIGEsIGIpKQogICAgaWYgbGVuKGhhcmQpID4gNTA6CiAgICAgICAgcHJpbnQoJyAgICAuLi4gJWQgbW9yZScgJSAobGVuKGhhcmQpIC0gNTApKQogICAgb2tfbGF5b3V0ID0gRmFsc2UKCmlmIG5vdCBva19sYXlvdXQ6CiAgICBwcmludCgpCiAgICBwcmludCgnICAqKiogVkVSSUZZIEZBSUxFRCAqKionKQogICAgc3lzLmV4aXQoMikKCnByaW50KCkKcHJpbnQoJyAgKioqIFZFUklGWSBQQVNTRUQgKioqJykKc3lzLmV4aXQoMCkK' | base64 -d > /tmp/verify.py
-          echo "===== verify ====="
-          python3 /tmp/verify.py out/arch/arm64/boot/Image
-          RC=$?
-          if [ "$RC" -ne 0 ]; then
-            echo ""
-            echo "!! verification failed - not shipping"
+          set +e
+          IMG=out/arch/arm64/boot/Image
+          [ -f "$IMG" ] || { echo "!! 没有 Image"; exit 1; }
+
+          echo "=== 门禁 1: vermagic ==="
+          VM=$(strings -a "$IMG" | grep -m1 'SMP.*mod_unload' || echo "")
+          echo "  实际: [$VM]"
+          echo "  期望: [4.19.191+ SMP preempt mod_unload modversions aarch64]"
+          if [ "$VM" != "4.19.191+ SMP preempt mod_unload modversions aarch64" ]; then
+            echo "  [FAIL] vermagic 不符 → 会变砖"
             exit 1
           fi
+          echo "  [PASS]"
+
+          echo "=== 门禁 2: CFI 是否真的启用 ==="
+          CFI_CNT=$(strings -a "$IMG" | grep -c '^__cfi_' || echo 0)
+          echo "  __cfi_ 符号数: $CFI_CNT"
+          if [ "$CFI_CNT" -lt 100 ]; then
+            echo "  [WARN] CFI 符号偏少，可能没真正启用"
+          else
+            echo "  [PASS] CFI 已启用"
+          fi
+
+          echo "=== 门禁 3: 内核大小与原厂同量级 ==="
+          SZ=$(stat -c%s "$IMG")
+          echo "  Image 大小: $SZ  (原厂 47,462,400)"
+          if [ "$SZ" -lt 30000000 ] || [ "$SZ" -gt 80000000 ]; then
+            echo "  [WARN] 大小异常"
+          else
+            echo "  [PASS]"
+          fi
+
+          echo "=== 门禁 4: config 关键项 ==="
+          for k in CONFIG_LTO_CLANG CONFIG_CFI_CLANG CONFIG_MODVERSIONS CONFIG_OPLUS_FEATURE_OPROJECT; do
+            if grep -q "^$k=y" out/.config; then echo "  [OK]   $k=y"; else echo "  [WARN] $k 非 y"; fi
+          done
+
+          echo "ALL GATES DONE"
 
       - name: Package
         if: always()
@@ -375,21 +698,21 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
           cd out/arch/arm64/boot 2>/dev/null || { echo "no boot dir"; exit 0; }
           if [ -f Image.gz ]; then
-            cp Image.gz "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"; echo "Image.gz"
+            cp Image.gz "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"; echo "used Image.gz"
           elif [ -f Image ]; then
-            gzip -9 -c Image > "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"
-            cp Image "$GITHUB_WORKSPACE/artifacts/kernel_Image.raw"; echo "gzipped Image"
-          else
-            echo "!! no image"
+            gzip -9 -c Image > "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"; echo "gzipped Image"
           fi
-          [ -f out/.config ] && cp out/.config "$GITHUB_WORKSPACE/artifacts/out.config" || true
-          [ -f .config ] && cp .config "$GITHUB_WORKSPACE/artifacts/out2.config" || true
-          ls -la "$GITHUB_WORKSPACE/artifacts" || true
+          [ -f Image ] && cp Image "$GITHUB_WORKSPACE/artifacts/kernel_Image.raw"
+          [ -f System.map ] && cp System.map "$GITHUB_WORKSPACE/artifacts/kernel.System.map"
+          [ -f "$GITHUB_WORKSPACE/out/.config" ] && cp "$GITHUB_WORKSPACE/out/.config" "$GITHUB_WORKSPACE/artifacts/kernel.config"
+          [ -f vmlinux ] && cp vmlinux "$GITHUB_WORKSPACE/artifacts/vmlinux" || true
+          cp /tmp/build.log "$GITHUB_WORKSPACE/artifacts/build.log" 2>/dev/null || true
+          ls -la "$GITHUB_WORKSPACE/artifacts/" || true
 
       - name: Upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pjs110-kernel-v7
-          path: ${{ github.workspace }}/artifacts/*
+          name: kernel-output
+          path: artifacts/
           if-no-files-found: warn

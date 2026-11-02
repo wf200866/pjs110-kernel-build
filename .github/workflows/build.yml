@@ -293,21 +293,6 @@ jobs:
             fi
           fi
 
-          echo "===== A4. module.c 版本校验双放行（WiFi ko CRC 拒载修复）====="
-          MODC="kernel/module.c"
-          if [ -f "$MODC" ]; then
-            cp "$MODC" /tmp/module.c.orig
-            echo 'IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiLorqkga2VybmVsL21vZHVsZS5jIOeahOeJiOacrOagoemqjOaXoOadoeS7tuaUvuihjOOAggoK5L6d5o2u77yI5YWo6YOo57uP5a6e5rWL56Gu6K6k77yJ77yaCiAgc3RydWN0IG1vZHVsZSDluIPlsYAgIOWOn+WOgiA9PSDmlrDnvJYgICAgaW5pdD0weDE4MCBleGl0PTB4M2EwIHNpemU9MTAyNAogIHZlcm1hZ2ljICAgICAgICAgICAg5LiA5a2X5LiN5beuICA0LjE5LjE5MSsgU01QIHByZWVtcHQgbW9kX3VubG9hZCBtb2R2ZXJzaW9ucyBhYXJjaDY0CiAg57yW6K+R5ZmoICAgICAgICAgICAgICBjbGFuZyAxMS4wLjEgKHIzODM5MDIpIOWPjOaWueS4gOiHtAogIOe6r+WOn+WOgiBjb25maWcg57yW6K+RICBDUkMg5LuN5pivIDB4ZjNjMGIxNjjvvIjljp/ljoIgMHhkZGZlYTVkYe+8iQogIOKGkiDlt67lvILlj6rmnaXoh6ogZ2Vua3N5bXMg5a+557G75Z6L5paH5pys55qE6Kej5p6Q77yM5Y6f5Y6C56eB5pyJIHBhdGNoIOS4jeWPr+W+lwoK5biD5bGA5LiA6Ie077yM56ym5Y+35ZCN5LiA6Ie077yM5ZSv5LiA5LiN5Yy56YWN55qE5piv54mI5pys5Y+35pWw5a2X5pys6Lqr44CCCui3s+i/h+aVsOWtl+avlOWvueS4jeaUueWPmOS7u+S9leWGheWtmOiuv+mXrui3r+W+hO+8mnZlbmRvciBrbyDmjInoh6rlt7HnmoTnu5PmnoTkvZPnkIbop6Porr/pl67lhoXmoLjvvIwK6ICM6YKj5Lu955CG6Kej5ZKM5paw5YaF5qC455qE5a6e6ZmF5biD5bGA6YCQ5a2X5q6155u45ZCM77yI6YeN5a6a5L2N5YGP56e75a6e5rWL5LiA6Ie077yJ44CCCgrlj6rlnKggI2lmZGVmIENPTkZJR19NT0RWRVJTSU9OUyDliIbmlK/lhoXmlLnlhpnvvIwjZWxzZSDliIbmlK/kv53mjIHljp/moLfjgIIKIiIiCgppbXBvcnQgc3lzCgpUQUcgPSAnT1BQT19BMlhfVkVORE9SX0tPX0JZUEFTUycKCgpkZWYgbWFpbihwYXRoKToKICAgIHMgPSBvcGVuKHBhdGgsIGVuY29kaW5nPSd1dGYtOCcsIGVycm9ycz0nc3Vycm9nYXRlZXNjYXBlJykucmVhZCgpCgogICAgaWYgVEFHIGluIHM6CiAgICAgICAgcHJpbnQoJyAgW3NraXBdIOW3suaJk+i/h+ihpeS4gScpCiAgICAgICAgcmV0dXJuIDAKCiAgICBhbmNob3JfaWZkZWYgPSAnI2lmZGVmIENPTkZJR19NT0RWRVJTSU9OU1xuJwogICAgaWYgYW5jaG9yX2lmZGVmIG5vdCBpbiBzOgogICAgICAgIHByaW50KCcgIFtGQUlMXSDmib7kuI3liLAgI2lmZGVmIENPTkZJR19NT0RWRVJTSU9OUycpCiAgICAgICAgcmV0dXJuIDEKICAgIGIwID0gcy5pbmRleChhbmNob3JfaWZkZWYpCgogICAgIyAtLS0tIDEuIGNoZWNrX3ZlcnNpb24gLS0tLQogICAga2V5ID0gJ3N0YXRpYyBpbnQgY2hlY2tfdmVyc2lvbihjb25zdCBzdHJ1Y3QgbG9hZF9pbmZvICppbmZvJwogICAgaWYga2V5IG5vdCBpbiBzOgogICAgICAgIHByaW50KCcgIFtGQUlMXSDmib7kuI3liLAgY2hlY2tfdmVyc2lvbicpCiAgICAgICAgcmV0dXJuIDEKICAgIGkgPSBzLmluZGV4KGtleSwgYjApCiAgICBqID0gcy5pbmRleCgnXG5iYWRfdmVyc2lvbjonLCBpKQogICAgYm9keSA9IHNbaTpqXQoKICAgIG1hcmtlciA9ICdcdHN0cnVjdCBtb2R2ZXJzaW9uX2luZm8gKnZlcnNpb25zO1xuJwogICAgaWYgbWFya2VyIG5vdCBpbiBib2R5OgogICAgICAgIHByaW50KCcgIFtGQUlMXSBjaGVja192ZXJzaW9uIOmHjOaJvuS4jeWIsOmUmueCuScpCiAgICAgICAgcmV0dXJuIDEKICAgIGJvZHkgPSBib2R5LnJlcGxhY2UoCiAgICAgICAgbWFya2VyLAogICAgICAgIG1hcmtlciArICdcblx0LyogJXM6IOW4g+WxgOW3suWunua1i+S4gOiHtO+8jOeJiOacrOWPt+avlOWvuei3s+i/hyAqL1xuXHRyZXR1cm4gMTtcbicgJSBUQUcsCiAgICAgICAgMSwKICAgICkKICAgIHMgPSBzWzppXSArIGJvZHkgKyBzW2o6XQogICAgcHJpbnQoJyAgW29rXSAgIGNoZWNrX3ZlcnNpb24g5pS55Li65peg5p2h5Lu25pS+6KGMJykKCiAgICAjIC0tLS0gMi4gY2hlY2tfbW9kc3RydWN0X3ZlcnNpb27vvIjlkIzkuIDljLrlnZflhoXvvIzlj4zkv53pmanvvIktLS0tCiAgICBrZXkyID0gJ3N0YXRpYyBpbmxpbmUgaW50IGNoZWNrX21vZHN0cnVjdF92ZXJzaW9uKGNvbnN0IHN0cnVjdCBsb2FkX2luZm8gKmluZm8sJwogICAgYjEgPSBzLmluZGV4KGFuY2hvcl9pZmRlZikKICAgIGUxID0gcy5pbmRleCgnXG4jZWxzZScsIGIxKQogICAgc2VnX3N0YXJ0ID0gcy5pbmRleChrZXkyLCBiMSkKICAgIGlmIHNlZ19zdGFydCA8IGUxOgogICAgICAgIHNlZ19lbmQgPSBzLmluZGV4KCdcbn1cbicsIHNlZ19zdGFydCkgKyAzCiAgICAgICAgbmV3ID0gKAogICAgICAgICAgICBrZXkyICsgJ1xuJwogICAgICAgICAgICAnXHRcdFx0XHRcdCAgc3RydWN0IG1vZHVsZSAqbW9kKVxuJwogICAgICAgICAgICAne1xuJwogICAgICAgICAgICAnXHQvKiAlczog5ZCM5LiKICovXG4nCiAgICAgICAgICAgICdcdHJldHVybiAxO1xuJwogICAgICAgICAgICAnfVxuJyAlIFRBRwogICAgICAgICkKICAgICAgICBzID0gc1s6c2VnX3N0YXJ0XSArIG5ldyArIHNbc2VnX2VuZDpdCiAgICAgICAgcHJpbnQoJyAgW29rXSAgIGNoZWNrX21vZHN0cnVjdF92ZXJzaW9uIOebtOaOpei/lOWbniAxJykKCiAgICBvcGVuKHBhdGgsICd3JywgZW5jb2Rpbmc9J3V0Zi04JywgZXJyb3JzPSdzdXJyb2dhdGVlc2NhcGUnKS53cml0ZShzKQogICAgcmV0dXJuIDAKCgppZiBfX25hbWVfXyA9PSAnX19tYWluX18nOgogICAgc3lzLmV4aXQobWFpbihzeXMuYXJndlsxXSkp' | base64 -d > /tmp/patch_modver.py
-            python3 -c "import ast;ast.parse(open('/tmp/patch_modver.py').read())" \
-              && echo "  [ok]   patch_modver.py 语法 OK"
-            python3 /tmp/patch_modver.py "$MODC" || { echo "  [FAIL] 版本校验补丁失败"; fail=1; }
-            echo "  --- 修后 ---"
-            sed -n "/#ifdef CONFIG_MODVERSIONS/,/^#else/p" "$MODC" \
-              | sed -n '/static int check_version/,/^bad_version:/p' | head -14
-          else
-            echo "  [FAIL] 缺 $MODC"; fail=1
-          fi
-
           echo "===== H. -Werror 全量降级（clang 下警告更多）====="
           grep -rl -- "-Werror" --include=Makefile --include=Kbuild \
                --include="*.mk" --include="*.mak" . 2>/dev/null | while read -r f; do
@@ -650,6 +635,33 @@ jobs:
 
           if [ "$RC" -ne 0 ]; then exit 1; fi
 
+
+      - name: Build modules
+        run: |
+          set +e
+          export PATH="$HOME/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          make O=out ARCH=arm64 -j$(nproc) \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
+            modules > /tmp/mod.log 2>&1
+          RC=$?
+          echo "=== MODULES EXIT: $RC ==="
+          grep -E 'Error |error:' /tmp/mod.log | head -20 || true
+          echo "=== 产出的 .ko ==="
+          find out -name '*.ko' -size +1k | sort
+
       - name: Gate - vermagic / CFI / LTO
         if: success()
         run: |
@@ -696,6 +708,10 @@ jobs:
         if: always()
         run: |
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cd "$GITHUB_WORKSPACE"
+          KOLIST=$(find out -name '*.ko' -size +1k 2>/dev/null)
+          echo "ko count: $(echo "$KOLIST" | grep -c . || true)"
+          [ -n "$KOLIST" ] && tar czf "$GITHUB_WORKSPACE/artifacts/modules.tar.gz" $KOLIST
           cd out/arch/arm64/boot 2>/dev/null || { echo "no boot dir"; exit 0; }
           if [ -f Image.gz ]; then
             cp Image.gz "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"; echo "used Image.gz"

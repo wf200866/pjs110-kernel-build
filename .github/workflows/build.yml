@@ -293,6 +293,42 @@ jobs:
             fi
           fi
 
+
+          echo "===== A5. CRC 宽容（只改 bad_version 分支，保留其余全部校验）====="
+          # 出处: tingao/saipan-droidspaces-kernel build/patch_module2.py
+          # check_version() 三种结局: crc匹配->return1 / 符号缺失->warn+return1 / crc不同->warn+return0
+          # 只把最后那个 return 0 改成 return 1。不动函数开头，保留符号存在性检查。
+          MODC2="kernel/module.c"
+          python3 - "$MODC2" <<'PYEOF2'
+import re, sys
+PATH = sys.argv[1]
+src = open(PATH, encoding="utf-8", errors="surrogateescape").read()
+if "OPPO_A2X_CRC_TOLERANT" in src:
+    print("  [skip] already patched"); sys.exit(0)
+pat = re.compile(
+    r'bad_version:\s*\n'
+    r'\s*pr_warn\("%s: disagrees about version of symbol %s\\n",\s*\n'
+    r'\s*(?P<name>mod|info)->name, symname\);\s*\n'
+    r'\s*return 0;'
+)
+m = pat.search(src)
+if not m:
+    print("  [FAIL] bad_version block not found"); sys.exit(1)
+replacement = (
+    'bad_version:\n'
+    '\t/* OPPO_A2X_CRC_TOLERANT: CRC mismatch -> warn once, load anyway. */\n'
+    '\tpr_warn_once("%s: symbol %s CRC differs (module expects 0x%lX) - loading anyway\\n",\n'
+    '\t\t     info->name, symname, versions[i].crc);\n'
+    '\treturn 1;'
+)
+src = src[:m.start()] + replacement + src[m.end():]
+open(PATH, "w", encoding="utf-8", errors="surrogateescape").write(src)
+print("  [ok]   check_version bad_version -> tolerant")
+PYEOF2
+          [ $? -eq 0 ] || { echo "  [FAIL] CRC 宽容补丁失败"; fail=1; }
+          echo "  marker count: $(grep -c 'OPPO_A2X_CRC_TOLERANT' kernel/module.c || echo 0)"
+
+
           echo "===== H. -Werror 全量降级（clang 下警告更多）====="
           grep -rl -- "-Werror" --include=Makefile --include=Kbuild \
                --include="*.mk" --include="*.mak" . 2>/dev/null | while read -r f; do
@@ -391,7 +427,13 @@ jobs:
           # ===== Droidspaces 官方 Step1：必需项（照文档逐条搬） =====
           # IPC
           setkv CONFIG_SYSCTL y
-          setkv CONFIG_SYSVIPC y
+          # ★ v12: SYSVIPC 会向 struct task_struct 插入 sysvsem/sysvshm，
+          #   位置在 fs/files/nsproxy/signal/sighand 之前 → 平移 vendor 模块编译时用的偏移
+          #   → 静默内存破坏（非干净失败）。IPC_NS 只需 (SYSVIPC || POSIX_MQUEUE)，
+          #   单开 POSIX_MQUEUE 即满足，其唯一结构影响是 struct user_struct +1 字段。
+          #   参考: tingao/saipan-droidspaces-kernel docs/KERNEL-NOTES.md §4
+          unsetkv CONFIG_SYSVIPC
+          setkv CONFIG_POSIX_MQUEUE y
           setkv CONFIG_POSIX_MQUEUE y
           # 核心 namespace
           setkv CONFIG_NAMESPACES y
@@ -635,33 +677,6 @@ jobs:
 
           if [ "$RC" -ne 0 ]; then exit 1; fi
 
-
-      - name: Build modules
-        run: |
-          set +e
-          export PATH="$HOME/clang/bin:$PATH"
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
-          make O=out ARCH=arm64 -j$(nproc) \
-            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
-            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
-            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
-            modules > /tmp/mod.log 2>&1
-          RC=$?
-          echo "=== MODULES EXIT: $RC ==="
-          grep -E 'Error |error:' /tmp/mod.log | head -20 || true
-          echo "=== 产出的 .ko ==="
-          find out -name '*.ko' -size +1k | sort
-
       - name: Gate - vermagic / CFI / LTO
         if: success()
         run: |
@@ -708,10 +723,6 @@ jobs:
         if: always()
         run: |
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          cd "$GITHUB_WORKSPACE"
-          KOLIST=$(find out -name '*.ko' -size +1k 2>/dev/null)
-          echo "ko count: $(echo "$KOLIST" | grep -c . || true)"
-          [ -n "$KOLIST" ] && tar czf "$GITHUB_WORKSPACE/artifacts/modules.tar.gz" $KOLIST
           cd out/arch/arm64/boot 2>/dev/null || { echo "no boot dir"; exit 0; }
           if [ -f Image.gz ]; then
             cp Image.gz "$GITHUB_WORKSPACE/artifacts/kernel_Image.gz"; echo "used Image.gz"
